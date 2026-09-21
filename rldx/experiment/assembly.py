@@ -370,6 +370,7 @@ def _apply_training_overrides(
     run_config.training.output_dir = cli.output_dir
     run_config.training.save_steps = cli.save_steps
     run_config.training.save_total_limit = cli.save_total_limit
+    run_config.training.keep_checkpoint_every_n_steps = cli.keep_checkpoint_every_n_steps
     run_config.training.num_gpus = cli.num_gpus
     run_config.training.use_wandb = cli.use_wandb
     run_config.training.max_steps = cli.max_steps

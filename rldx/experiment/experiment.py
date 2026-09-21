@@ -33,6 +33,7 @@ from rldx.experiment.trainer import ProfCallback, RLDXTrainer
 from rldx.experiment.utils import (
     BestMetricCheckpointCallback,
     CheckpointFormatCallback,
+    MilestoneCheckpointCallback,
     NewParamWarmupCallback,
 )
 from rldx.model import MODEL_REGISTRY
@@ -236,6 +237,12 @@ def run(config: Config):
             processor_dir=processor_dir,
         )
     )
+
+    # Registered after CheckpointFormatCallback so the milestone copy already
+    # contains experiment_cfg/ and processor/.
+    keep_every = getattr(config.training, "keep_checkpoint_every_n_steps", 0)
+    if keep_every > 0:
+        trainer.add_callback(MilestoneCheckpointCallback(every_n_steps=keep_every))
 
     if config.training.save_best_eval_metric_name != "":
         trainer.add_callback(

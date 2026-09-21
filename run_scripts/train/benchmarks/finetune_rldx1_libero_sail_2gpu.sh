@@ -14,8 +14,10 @@
 #   1. dataset            -> the SAIL delta dataset carrying action.precision
 #   2. modality config    -> libero_sail_config.py (baseline + precision column)
 #   3. EAG flags          -> the four --*future-action-condition* / --eag-* knobs
-#   4. --save-total-limit -> 5, so checkpoint-20000 survives until step 25000
-#                            and the keep-ckpt watcher jobs can copy it out.
+#   4. checkpoint retention -> --save-steps 1000 keeps preemption recovery cheap,
+#                            and --keep-checkpoint-every-n-steps 20000 copies the
+#                            20k/40k/60k models to <run>_step<N>, where the
+#                            --save-total-limit rotation cannot reach them.
 #
 # Smoke (2-GPU srun shell):  MAX_STEPS=10 SAVE_STEPS=10 bash <this script>
 # Full (slurm):              mkdir -p out; sbatch <this script>
@@ -64,6 +66,12 @@ export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$BASE_DIR/.cache/triton}"
 export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-$BASE_DIR/.cache/torch_extensions}"
 # Invoke the installed environment directly: training must not resolve/install packages.
 export PATH="$BASE_DIR/.venv/bin:$PATH"
+# A 60,000-step job needs to be watchable. Off by default so the smoke and
+# the slurm path stay byte-identical to the verified baseline recipe.
+WANDB_ARGS=()
+if [[ "${USE_WANDB:-0}" == 1 ]]; then
+    WANDB_ARGS=(--use-wandb --wandb-project "${WANDB_PROJECT:-rldx1_sail}")
+fi
 echo "Image checkpoint=$BASE_MODEL_PATH frames=1 global_batch=$GLOBAL_BATCH_SIZE GPUs=$NUM_GPUS accumulation=$GRAD_ACCUM microbatch=$((GLOBAL_BATCH_SIZE / NUM_GPUS / GRAD_ACCUM))"
 exec "$BASE_DIR/.venv/bin/torchrun" --standalone --nnodes=1 --nproc_per_node="$NUM_GPUS" \
     rldx/experiment/launch_train.py \
@@ -79,4 +87,6 @@ exec "$BASE_DIR/.venv/bin/torchrun" --standalone --nnodes=1 --nproc_per_node="$N
     --state-dropout-prob 0.0 --num-gpus "$NUM_GPUS" \
     --global-batch-size "$GLOBAL_BATCH_SIZE" --gradient-accumulation-steps "$GRAD_ACCUM" \
     --max-steps "$MAX_STEPS" --save-steps "${SAVE_STEPS:-1000}" --save-total-limit 5 \
-    --output-dir "$OUTPUT_DIR" --experiment-name "$RUN_NAME"
+    --keep-checkpoint-every-n-steps "${KEEP_EVERY:-20000}" \
+    --output-dir "$OUTPUT_DIR" --experiment-name "$RUN_NAME" \
+        "${WANDB_ARGS[@]+"${WANDB_ARGS[@]}"}"

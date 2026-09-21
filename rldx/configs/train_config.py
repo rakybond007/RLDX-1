@@ -214,6 +214,11 @@ class TrainConfig:
 
     eag_cfg_weight: float = 1.0
     """CFG weight w in v = v_null + (1 + w) (v_cond - v_null)."""
+
+    keep_checkpoint_every_n_steps: int = 0
+    """Copy every Nth checkpoint to `<run_dir>_step<N>`, outside the
+    --save-total-limit rotation. 0 disables. Set 20000 so the 20k/40k/60k
+    models survive a run that saves every 1,000 steps for preemption recovery."""
     # ────────────────────────────────────────────────────────────────────────────
 
     freeze_cog_tokens: bool = False

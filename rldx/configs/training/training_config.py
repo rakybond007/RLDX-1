@@ -76,6 +76,9 @@ class TrainingConfig:
     logging_steps: int = 10
     save_steps: int = 1000
     save_total_limit: int = 5
+    # Copy every Nth checkpoint to `<run_dir>_step<N>`, outside the rotation
+    # that save_total_limit performs. 0 disables. See MilestoneCheckpointCallback.
+    keep_checkpoint_every_n_steps: int = 0
 
     # Model saving
     save_vl_model: bool = False  # Control whether to save VL model and processor in callbacks

@@ -208,6 +208,60 @@ class CheckpointFormatCallback(TrainerCallback):
                 shutil.copy2(wandb_config_src, wandb_config_dst)
 
 
+class MilestoneCheckpointCallback(TrainerCallback):
+    """Copy every Nth checkpoint out of the rotation, next to the run directory.
+
+    `--save-total-limit` deletes old checkpoints as new ones appear, so a run
+    with `--save-steps 1000 --save-total-limit 5` keeps only the last five: the
+    20,000-step model is gone by step 25,000. Raising `--save-steps` instead
+    would widen the preemption-recovery gap to the same 20,000 steps.
+
+    This keeps both. The trainer saves often, and each milestone checkpoint is
+    copied to `<run_dir>_step<N>`, which nothing rotates.
+
+    `optimizer.pt` is skipped: it is the largest file in a checkpoint and is
+    only needed to resume, which the in-rotation copy already covers.
+
+    A failure here must never take down the run that produced the checkpoint,
+    so everything is guarded and reported rather than raised.
+    """
+
+    SKIP = {"optimizer.pt"}
+
+    def __init__(self, every_n_steps: int):
+        self.every_n_steps = int(every_n_steps)
+
+    def on_save(self, args, state, control, **kwargs):
+        if self.every_n_steps <= 0 or not state.is_world_process_zero:
+            return
+        step = state.global_step
+        if step == 0 or step % self.every_n_steps != 0:
+            return
+
+        run_dir = Path(args.output_dir)
+        src = run_dir / f"checkpoint-{step}"
+        dst = run_dir.parent / f"{run_dir.name}_step{step}"
+        if dst.exists():
+            print(f"[milestone] already kept: {dst}")
+            return
+        if not src.is_dir():
+            print(f"[milestone] nothing to copy at {src}")
+            return
+
+        tmp = dst.with_name(dst.name + ".partial")
+        try:
+            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.copytree(
+                src, tmp, ignore=lambda d, names: [n for n in names if n in self.SKIP]
+            )
+            tmp.rename(dst)  # only becomes the final name once it is complete
+            total = sum(f.stat().st_size for f in dst.rglob("*") if f.is_file())
+            print(f"[milestone] kept {src} -> {dst} ({total / 1e9:.2f} GB)")
+        except Exception as exc:  # noqa: BLE001 - never kill training over a copy
+            shutil.rmtree(tmp, ignore_errors=True)
+            print(f"[milestone] WARNING: could not keep {src}: {exc}")
+
+
 class BestMetricCheckpointCallback(TrainerCallback):
     """This callback saves the best checkpoint based on the metric."""
 
