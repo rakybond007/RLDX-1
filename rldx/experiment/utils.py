@@ -219,14 +219,25 @@ class MilestoneCheckpointCallback(TrainerCallback):
     This keeps both. The trainer saves often, and each milestone checkpoint is
     copied to `<run_dir>_step<N>`, which nothing rotates.
 
-    `optimizer.pt` is skipped: it is the largest file in a checkpoint and is
-    only needed to resume, which the in-rotation copy already covers.
+    Optimizer state is skipped: it is the bulk of a checkpoint and is only
+    needed to resume, which the in-rotation copy already covers. Under
+    DeepSpeed that state is the `global_step<N>/` directory (48 GB of a 65 GB
+    LIBERO checkpoint), not `optimizer.pt`, so both are excluded.
 
     A failure here must never take down the run that produced the checkpoint,
     so everything is guarded and reported rather than raised.
     """
 
-    SKIP = {"optimizer.pt"}
+    SKIP_NAMES = {"optimizer.pt", "scheduler.pt"}
+    SKIP_PREFIXES = ("global_step",)  # DeepSpeed ZeRO shards
+
+    @classmethod
+    def _ignore(cls, directory, names):
+        return [
+            n
+            for n in names
+            if n in cls.SKIP_NAMES or n.startswith(cls.SKIP_PREFIXES)
+        ]
 
     def __init__(self, every_n_steps: int):
         self.every_n_steps = int(every_n_steps)
@@ -251,9 +262,7 @@ class MilestoneCheckpointCallback(TrainerCallback):
         tmp = dst.with_name(dst.name + ".partial")
         try:
             shutil.rmtree(tmp, ignore_errors=True)
-            shutil.copytree(
-                src, tmp, ignore=lambda d, names: [n for n in names if n in self.SKIP]
-            )
+            shutil.copytree(src, tmp, ignore=self._ignore)
             tmp.rename(dst)  # only becomes the final name once it is complete
             total = sum(f.stat().st_size for f in dst.rglob("*") if f.is_file())
             print(f"[milestone] kept {src} -> {dst} ({total / 1e9:.2f} GB)")

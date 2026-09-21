@@ -302,6 +302,10 @@ def test_milestone_callback_copies_only_on_multiples():
             (d / "model.safetensors").write_bytes(b"w")
             (d / "trainer_state.json").write_text("{}")
             (d / "optimizer.pt").write_bytes(b"x" * 1024)
+            # RLDX trains under DeepSpeed: the real optimizer state is here.
+            gs = d / f"global_step{step}"
+            gs.mkdir()
+            (gs / "zero_pp_rank_0_mp_rank_00_optim_states.pt").write_bytes(b"y" * 4096)
             cb.on_save(SimpleNamespace(output_dir=str(run)),
                        SimpleNamespace(global_step=step, is_world_process_zero=True), None)
 
@@ -313,6 +317,9 @@ def test_milestone_callback_copies_only_on_multiples():
         got = sorted(p.name for p in (run.parent / "a_run_step20000").iterdir())
         assert "model.safetensors" in got and "trainer_state.json" in got, got
         assert "optimizer.pt" not in got, "optimizer.pt must be skipped"
+        assert not any(n.startswith("global_step") for n in got), (
+            f"DeepSpeed optimizer shards must be skipped, got {got}"
+        )
 
         # Rotation deletes the in-run copy; the kept one must survive it.
         shutil.rmtree(run / "checkpoint-20000")
