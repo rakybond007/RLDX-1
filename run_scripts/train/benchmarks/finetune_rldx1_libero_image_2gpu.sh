@@ -46,14 +46,6 @@ export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$BASE_DIR/.cache/triton}"
 export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-$BASE_DIR/.cache/torch_extensions}"
 # Invoke the installed environment directly: training must not resolve/install packages.
 export PATH="$BASE_DIR/.venv/bin:$PATH"
-# Gate the full baseline on a real GPU smoke run with the exact same batch/model/data.
-# A separate run name prevents smoke weights or optimizer state entering the baseline.
-if [[ "${SMOKE_FIRST:-1}" == 1 ]] && (( MAX_STEPS > 10 )); then
-    echo 'Running LIBERO 10-step smoke before the full baseline.'
-    SMOKE_FIRST=0 MAX_STEPS=10 SAVE_STEPS=10 RUN_NAME="${RUN_NAME}_smoke_${SLURM_JOB_ID:-manual}" \
-        bash "$BASE_DIR/run_scripts/train/benchmarks/finetune_rldx1_libero_image_2gpu.sh"
-    echo 'LIBERO smoke passed; starting the full baseline from PT-IMG.'
-fi
 echo "Image checkpoint=$BASE_MODEL_PATH frames=1 global_batch=$GLOBAL_BATCH_SIZE GPUs=$NUM_GPUS accumulation=$GRAD_ACCUM microbatch=$((GLOBAL_BATCH_SIZE / NUM_GPUS / GRAD_ACCUM))"
 exec "$BASE_DIR/.venv/bin/torchrun" --standalone --nnodes=1 --nproc_per_node="$NUM_GPUS" \
     rldx/experiment/launch_train.py \
