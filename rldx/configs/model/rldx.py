@@ -200,6 +200,21 @@ class RLDXConfig(PretrainedConfig):
     # RLDX/MSAT). None = all steps, 1 = cheapest single-step variant.
     rtc_jacobian_steps_only: int | None = 3
 
+    # SAIL Error-Adaptive Guidance (EAG). Ported from our GR00T-N1.5 run
+    # (gr00t/model/action_head/flow_matching_action_head.py).
+    #   The first `future_action_condition_horizon` actions of the target
+    #   chunk are encoded into extra tokens appended to the state tokens.
+    #   Training drops the whole condition with probability
+    #   `future_action_condition_dropout` so the same weights serve as the
+    #   unconditional branch; inference combines the two with CFG.
+    # Disabled by default so existing RLDX checkpoints load unchanged.
+    # EAG and RTC both rewrite the chunk-boundary conditioning and are
+    # mutually exclusive (asserted in RLDX.__init__).
+    use_future_action_condition: bool = False
+    future_action_condition_horizon: int = 4
+    future_action_condition_dropout: float = 0.1
+    eag_cfg_weight: float = 1.0
+
     # Memory configuration
     use_memory: bool = False  # Enable memory-augmented cognition tokens
     memory_length: int = 4  # Number of past timesteps for memory (= context_window)

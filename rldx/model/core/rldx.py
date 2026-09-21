@@ -133,6 +133,51 @@ class RLDXActionModel(nn.Module):
                 f"inference_delay={self._rtc.inference_delay}"
             )
 
+        # SAIL Error-Adaptive Guidance (EAG).
+        #
+        # The guide is the first `future_action_condition_horizon` actions of
+        # the chunk being predicted. They are encoded into extra tokens that
+        # sit alongside the state tokens, so the action tokens themselves are
+        # untouched and `action_decoder` output is still sliced from the end
+        # (`pred[:, -horizon:]`) whether or not the guide is present.
+        #
+        # Training zeroes the whole guide with probability
+        # `future_action_condition_dropout`; that all-zero guide is the null
+        # token the CFG branch reuses at inference.
+        self.use_future_action_condition = bool(
+            getattr(config, "use_future_action_condition", False)
+        )
+        self.future_action_condition_horizon = int(
+            getattr(config, "future_action_condition_horizon", 4)
+        )
+        self.future_action_condition_dropout = float(
+            getattr(config, "future_action_condition_dropout", 0.1)
+        )
+        self.eag_cfg_weight = float(getattr(config, "eag_cfg_weight", 1.0))
+        if self.use_future_action_condition:
+            if self._rtc.enabled_training() or self._rtc.enabled_inference():
+                raise ValueError(
+                    "EAG and RTC both rewrite chunk-boundary conditioning and "
+                    "cannot be enabled together. Set rtc_training_max_delay=0 "
+                    "and rtc_inference_mode='none' to train with EAG."
+                )
+            if not 1 <= self.future_action_condition_horizon <= self.action_horizon:
+                raise ValueError(
+                    f"future_action_condition_horizon must be in "
+                    f"[1, {self.action_horizon}], got "
+                    f"{self.future_action_condition_horizon}"
+                )
+            self.future_action_condition_encoder = nn.Sequential(
+                nn.Linear(self.action_dim, self.input_embedding_dim),
+                nn.GELU(),
+                nn.Linear(self.input_embedding_dim, self.input_embedding_dim),
+            )
+            _print(
+                f"[EAG] enabled: horizon={self.future_action_condition_horizon}, "
+                f"dropout={self.future_action_condition_dropout}, "
+                f"cfg_weight={self.eag_cfg_weight}"
+            )
+
         # Physics (tactile/torque) stream
         self.use_physics = getattr(config, "use_physics", False)
         physics_dim = getattr(config, "physics_dim", 0)
@@ -392,6 +437,21 @@ class RLDXActionModel(nn.Module):
             pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
             action_features = action_features + pos_embs
 
+        # EAG: guide on the chunk's own leading actions, dropped per sample so
+        # the same weights also learn the unconditional branch.
+        if self.use_future_action_condition:
+            h = self.future_action_condition_horizon
+            if actions.shape[1] < h:
+                raise ValueError(
+                    f"action horizon {actions.shape[1]} < EAG guide horizon {h}"
+                )
+            guide_actions = actions[:, :h].clone()
+            drop = torch.rand(batch_size, device=actions.device)
+            guide_actions[drop < self.future_action_condition_dropout] = 0
+            state_features = self._append_future_action_condition(
+                state_features, guide_actions
+            )
+
         # Join vision, language, state and action embedding along sequence dimension.
         sa_embs = torch.cat((state_features, action_features), dim=1)
 
@@ -456,6 +516,39 @@ class RLDXActionModel(nn.Module):
             results["physics_loss"] = physics_loss
 
         return results
+
+    def _append_future_action_condition(self, state_features, guide_actions):
+        """Append EAG guide tokens to the state tokens.
+
+        `guide_actions=None` produces the all-zero guide, which is the null
+        token the unconditional branch is trained on (training zeroes the
+        guide with probability `future_action_condition_dropout`).
+
+        Returns `state_features` unchanged when EAG is off, so every caller
+        can route through here.
+        """
+        if not self.use_future_action_condition:
+            return state_features
+        batch_size = state_features.shape[0]
+        if guide_actions is None:
+            guide_actions = state_features.new_zeros(
+                batch_size, self.future_action_condition_horizon, self.action_dim
+            )
+        width = guide_actions.shape[1]
+        if (
+            guide_actions.shape[0] != batch_size
+            or guide_actions.shape[2] != self.action_dim
+            or not 1 <= width <= self.future_action_condition_horizon
+        ):
+            raise ValueError(
+                f"guide_actions must be (B={batch_size}, "
+                f"1..{self.future_action_condition_horizon}, {self.action_dim}); "
+                f"got {tuple(guide_actions.shape)}"
+            )
+        guide_tokens = self.future_action_condition_encoder(
+            guide_actions.to(dtype=state_features.dtype)
+        )
+        return torch.cat((state_features, guide_tokens), dim=1)
 
     def _encode_features(
         self, backbone_output: BatchFeature, action_input: BatchFeature
@@ -620,13 +713,57 @@ class RLDXActionModel(nn.Module):
         if encoder_attention_mask is not None and encoder_attention_mask.all():
             encoder_attention_mask = None
 
-        def _dit_forward(x_tau: torch.Tensor, t_scalar: torch.Tensor, t_tok: torch.Tensor):
+        # ─── EAG setup ──────────────────────────────────────────────────────
+        # The guide is the not-yet-executed tail of the previous chunk, handed
+        # in by the caller as ``eag_guide_actions`` (or ``action``, matching
+        # the GR00T-N1.5 serving path). Absent at episode start, where the
+        # unconditional branch alone is the intended behaviour.
+        eag_guide = None
+        if self.use_future_action_condition and action_input is not None:
+            maybe_guide = action_input.get("eag_guide_actions", None)
+            if maybe_guide is None:
+                maybe_guide = action_input.get("action", None)
+            if maybe_guide is not None:
+                if not isinstance(maybe_guide, torch.Tensor):
+                    maybe_guide = torch.as_tensor(maybe_guide, dtype=dtype, device=device)
+                else:
+                    maybe_guide = maybe_guide.to(device=device, dtype=dtype)
+                width = min(maybe_guide.shape[1], self.future_action_condition_horizon)
+                if width < 1:
+                    raise ValueError(
+                        f"EAG guide must carry at least one action; got "
+                        f"{tuple(maybe_guide.shape)}"
+                    )
+                if not torch.isfinite(maybe_guide).all():
+                    raise ValueError("EAG guide contains NaN or Inf values")
+                eag_guide = maybe_guide[:, :width].contiguous()
+        # Null state is constant across Euler steps, so build both once.
+        eag_null_state = self._append_future_action_condition(state_features, None)
+        eag_cond_state = (
+            self._append_future_action_condition(state_features, eag_guide)
+            if eag_guide is not None
+            else None
+        )
+        _print(
+            f"[EAG] enabled={self.use_future_action_condition} "
+            f"guide={'none' if eag_guide is None else tuple(eag_guide.shape)} "
+            f"w={self.eag_cfg_weight}"
+        )
+
+        def _dit_forward(
+            x_tau: torch.Tensor,
+            t_scalar: torch.Tensor,
+            t_tok: torch.Tensor,
+            state_tokens: torch.Tensor | None = None,
+        ):
             """One MSAT forward at the current Euler step."""
             af = self.action_encoder(x_tau, t_tok, embodiment_id)
             if self.config.add_pos_embed:
                 pos_ids = torch.arange(af.shape[1], dtype=torch.long, device=device)
                 af = af + self.position_embedding(pos_ids).unsqueeze(0)
-            sa = torch.cat((state_features, af), dim=1)
+            sa = torch.cat(
+                (eag_null_state if state_tokens is None else state_tokens, af), dim=1
+            )
             phy_embs = self.physics.build_tokens(phys_state, t_scalar)
             mo = self.model(
                 hidden_states=sa,
@@ -717,6 +854,20 @@ class RLDXActionModel(nn.Module):
                     ao = mo["action"] if isinstance(mo, dict) else mo
                     pred_velocity = self.action_decoder(ao, embodiment_id)[:, -horizon:]
                     model_output = mo
+                    # EAG classifier-free guidance. The forward above is the
+                    # unconditional branch (null guide); run the conditional
+                    # one and extrapolate away from it.
+                    if eag_cond_state is not None:
+                        mo_cond = _dit_forward(
+                            actions, t_scalar, t_tok, state_tokens=eag_cond_state
+                        )
+                        ao_cond = mo_cond["action"] if isinstance(mo_cond, dict) else mo_cond
+                        cond_velocity = self.action_decoder(ao_cond, embodiment_id)[
+                            :, -horizon:
+                        ]
+                        pred_velocity = pred_velocity + (1.0 + self.eag_cfg_weight) * (
+                            cond_velocity - pred_velocity
+                        )
 
             # Euler step.
             with torch.no_grad():

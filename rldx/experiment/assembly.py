@@ -225,6 +225,14 @@ def _apply_cli_model_overrides(
     # guidance knob, not a training-time setting. See RLDXConfig comment.
     run_config.model.rtc_jacobian_steps_only = cli.rtc_jacobian_steps_only
 
+    # EAG: same reasoning as RTC above — copy every knob so the checkpoint
+    # config records what was actually trained, and so the eval server can
+    # rebuild the guidance path from the checkpoint alone.
+    run_config.model.use_future_action_condition = cli.use_future_action_condition
+    run_config.model.future_action_condition_horizon = cli.future_action_condition_horizon
+    run_config.model.future_action_condition_dropout = cli.future_action_condition_dropout
+    run_config.model.eag_cfg_weight = cli.eag_cfg_weight
+
 
 # Features that can be offloaded from a pretrained checkpoint (model arch
 # stays intact apart from the dropped stream, and strict-false state_dict load

@@ -198,6 +198,22 @@ class TrainConfig:
     """Apply Jacobian guidance only on the first N denoising steps. Default 3
     (skip last τ→1 step where VJP residual is mostly numerical noise).
     None = all steps, 1 = cheapest single-step variant."""
+
+    # ── SAIL Error-Adaptive Guidance (EAG) ───────────────────────────────────
+    use_future_action_condition: bool = False
+    """Condition the chunk on its own first few actions and combine the
+    conditional and unconditional branches with CFG at inference (SAIL EAG).
+    Mutually exclusive with RTC."""
+
+    future_action_condition_horizon: int = 4
+    """Number of leading target-chunk actions used as the guide. 4 for SAIL."""
+
+    future_action_condition_dropout: float = 0.1
+    """Per-sample probability of zeroing the whole guide during training, which
+    is what trains the unconditional branch."""
+
+    eag_cfg_weight: float = 1.0
+    """CFG weight w in v = v_null + (1 + w) (v_cond - v_null)."""
     # ────────────────────────────────────────────────────────────────────────────
 
     freeze_cog_tokens: bool = False
