@@ -33,12 +33,13 @@ downloaded there. Otherwise the launcher downloads from Hugging Face.
 For a full 60,000-step run (submit only when ready):
 
 ```bash
-sbatch run_scripts/train/benchmarks/finetune_rldx1_robocasa_image_2gpu.sh
+sbatch --export=ALL,MODEL_OUTPUT_DIR=/rlwrld-unified-checkpoints/hojin2/checkpoints/rldx1_image_baselines \
+  run_scripts/train/benchmarks/finetune_rldx1_robocasa_image_2gpu.sh
 ```
 
-The default Slurm partition/accounting settings follow the local GR00T
-recipes. Override resource settings using `sbatch` options on another cluster.
-`OUTPUT_DIR` is the output parent; the launcher adds `RUN_NAME` beneath it.
+The default Slurm partition is `sjw_alinlab_premium`, with local GR00T
+accounting settings. CPU resources are assigned automatically by the cluster. Override resource settings using `sbatch` options on another cluster.
+`OUTPUT_DIR` (falling back to `MODEL_OUTPUT_DIR`) is the output parent; the launcher adds `RUN_NAME` beneath it.
 Other overrides: `MAX_STEPS`, `SAVE_STEPS`, `NUM_WORKERS`, `GRAD_ACCUM`.
 The standard random-access dataset mode avoids preloading large episode shards
 for a short smoke run. WandB is disabled by default.
@@ -68,3 +69,32 @@ python3 tests/test_effective_batch.py
 - Training and final export completed with shell exit code 0. This verifies
   the training path, not downstream policy success or convergence.
 - Log: `out/smoke_img_gb64.log`; artifacts: `outputs/smoke_img_gb64/`.
+
+## Premium baseline submissions (2026-09-22 KST)
+
+| Dataset | Job | GPUs | Batch per GPU | Global batch | Baseline steps |
+|---|---|---|---|---|---|
+| RoboCasa Kitchen | 202539 | 2 | 32 | 64 | 60,000 |
+| LIBERO (40 tasks) | 202540 | 2 | 16 | 32 | 60,000 |
+
+Both use PT-IMG, one frame per camera, action horizon 16, accumulation 1,
+and the `sjw_alinlab_premium` partition (48-hour time limit). They prefer the
+existing local `models/RLDX-1-PT-IMG` download. The output parent is
+`/rlwrld-unified-checkpoints/hojin2/checkpoints/rldx1_image_baselines`; run
+names are `rldx1_img_robocasa_gb64_60k_baseline` and
+`rldx1_img_libero_gb32_60k_baseline`. Checkpoints are saved every 1,000 steps
+with two retained. The launcher resumes if the same run already has a valid
+checkpoint.
+
+LIBERO uses `finetune_rldx1_libero_image_2gpu.sh` and the existing
+`libero_gr00t_delta` dataset (1,693 episodes, 273,465 frames, 40 tasks).
+By default `SMOKE_FIRST=1`: the job first runs 10 steps with the same
+model/data/global batch in a separate `_smoke_<jobid>` output. Only a zero
+exit status allows the full baseline to start, fresh from PT-IMG. Smoke
+weights never seed the full baseline. A smoke failure fails the job.
+At submission time LIBERO GPU smoke is pending, not yet verified.
+
+```bash
+sbatch --export=ALL,MODEL_OUTPUT_DIR=/rlwrld-unified-checkpoints/hojin2/checkpoints/rldx1_image_baselines \
+  run_scripts/train/benchmarks/finetune_rldx1_libero_image_2gpu.sh
+```
