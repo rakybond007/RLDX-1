@@ -34,6 +34,22 @@ class TrainingConfig:
     batch_size: Optional[int] = None
     gradient_accumulation_steps: int = 1
 
+    def per_device_batch_size(self) -> int:
+        """Resolve the microbatch while preserving the effective global batch."""
+        if self.num_gpus < 1 or self.gradient_accumulation_steps < 1:
+            raise ValueError("num_gpus and gradient_accumulation_steps must be positive")
+        if self.batch_size is not None:
+            if self.batch_size < 1:
+                raise ValueError("batch_size must be positive")
+            return self.batch_size
+        divisor = self.num_gpus * self.gradient_accumulation_steps
+        if self.global_batch_size < 1 or self.global_batch_size % divisor:
+            raise ValueError(
+                "global_batch_size must be positive and divisible by "
+                "num_gpus * gradient_accumulation_steps"
+            )
+        return self.global_batch_size // divisor
+
     # Optimization
     learning_rate: float = 1e-4
     lr_scheduler_type: str = "cosine"

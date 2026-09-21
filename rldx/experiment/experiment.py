@@ -54,9 +54,7 @@ def setup_logging(debug: bool = False):
 
 def warn_configs(config: Config):
     # updates to batch size
-    assert config.training.global_batch_size % config.training.num_gpus == 0, (
-        "global_batch_size must be divisible by num_gpus"
-    )
+    config.training.per_device_batch_size()
 
     if config.data.video_backend != "torchcodec":
         warnings.warn(
@@ -183,10 +181,7 @@ def run(config: Config):
         deepspeed_config = None
 
     # For now we will let batch_size override global_batch_size, in future we will deprecate batch_size
-    if config.training.batch_size is None:
-        per_device_train_batch_size = config.training.global_batch_size // config.training.num_gpus
-    else:
-        per_device_train_batch_size = config.training.batch_size
+    per_device_train_batch_size = config.training.per_device_batch_size()
 
     print(f"per_device_train_batch_size: {per_device_train_batch_size}")
 
