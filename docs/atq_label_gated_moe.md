@@ -1,7 +1,7 @@
 # ATQ label-gated variable-horizon MoE
 
 Port of the label-gated ATQ method from `GR00T-action-quantization`
-(branch `jimin-dev-ATQ-finalized-only`, recipe
+(branch `jimin-dev-label-gated`, recipe
 `run_scripts/gpu26/atq_label_gated_train.sh`) onto RLDX-1's MSAT action
 model. Original ATQ let a router choose freely among four experts; the
 label-gated variant uses a VLM speed-confidence label so that **the label

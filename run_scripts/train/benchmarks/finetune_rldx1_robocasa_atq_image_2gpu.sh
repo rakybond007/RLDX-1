@@ -15,7 +15,8 @@
 #
 #   SPEED=2.0|2.5        compressed-group speed (block plan)
 #   VARIANT=vlm|vlm_contact|contact   which baked conf dataset to read
-#   ROTATION_MERGE=so3|legacy         SO(3) composition vs summed rotation deltas
+#   ROTATION_MERGE=legacy|so3         summed rotation deltas (upstream gpu26 run) vs SO(3) composition
+#   INIT_EXPERTS_FROM_MAIN=0|1        0 = random-init m8/m4/n8 decoders (upstream gpu26 run), 1 = copy main
 #   TAU=0.5              conf threshold written into the checkpoint (eval knob)
 #
 # The label is baked into the dataset (run_scripts/data/atq_labels/README.md),
@@ -34,9 +35,10 @@ cd "$BASE_DIR"
 
 SPEED="${SPEED:?set SPEED=2.0 or 2.5}"
 VARIANT="${VARIANT:?set VARIANT=vlm|vlm_contact|contact}"
-ROTATION_MERGE="${ROTATION_MERGE:-so3}"
+ROTATION_MERGE="${ROTATION_MERGE:-legacy}"
+INIT_EXPERTS_FROM_MAIN="${INIT_EXPERTS_FROM_MAIN:-0}"
 TAU="${TAU:-0.5}"
-CONF_DATA_ROOT="${CONF_DATA_ROOT:-/sjw_alinlab2/home/myungkyu/.cache/huggingface/lerobot/kimtaey}"
+CONF_DATA_ROOT="${CONF_DATA_ROOT:-/sjw_alinlab2/home/jimin/workspace/dataset}"
 DATA_DIR="${DATA_DIR:-$CONF_DATA_ROOT/robocasa_conf_$VARIANT}"
 
 if [[ -z "${BASE_MODEL_PATH:-}" ]]; then
@@ -51,7 +53,9 @@ GLOBAL_BATCH_SIZE=64
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 MAX_STEPS="${MAX_STEPS:-60000}"
 SPEED_TAG="${SPEED//./}"
-RUN_NAME="${RUN_NAME:-rldx1_img_robocasa_atq_labelgated_${SPEED_TAG}_${VARIANT}_${ROTATION_MERGE}_gb64_60k}"
+INIT_TAG=$([[ "$INIT_EXPERTS_FROM_MAIN" == "1" ]] && echo initmain || echo initrand)
+INIT_FLAG=$([[ "$INIT_EXPERTS_FROM_MAIN" == "1" ]] && echo --atq-init-experts-from-main || echo --no-atq-init-experts-from-main)
+RUN_NAME="${RUN_NAME:-rldx1_img_robocasa_atq_labelgated_${SPEED_TAG}_${VARIANT}_${ROTATION_MERGE}_${INIT_TAG}_gb64_60k}"
 OUTPUT_DIR="${OUTPUT_DIR:-${MODEL_OUTPUT_DIR:-$BASE_DIR/outputs}}"
 
 [[ -f "$DATA_DIR/meta/modality.json" ]] || { echo "Missing dataset: $DATA_DIR" >&2; exit 1; }
@@ -71,19 +75,22 @@ EOF
 }
 export NO_ALBUMENTATIONS_UPDATE=1
 export TOKENIZERS_PARALLELISM=false
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS=1
 export WANDB_MODE="${WANDB_MODE:-disabled}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$BASE_DIR/.cache/uv}"
 export HF_HOME="${HF_HOME:-$BASE_DIR/.cache/huggingface}"
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$BASE_DIR/.cache/triton}"
 export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-$BASE_DIR/.cache/torch_extensions}"
 export PATH="$BASE_DIR/.venv/bin:$PATH"
-echo "ATQ checkpoint=$BASE_MODEL_PATH data=$DATA_DIR speed=$SPEED rotation=$ROTATION_MERGE tau=$TAU global_batch=$GLOBAL_BATCH_SIZE GPUs=$NUM_GPUS accumulation=$GRAD_ACCUM microbatch=$((GLOBAL_BATCH_SIZE / NUM_GPUS / GRAD_ACCUM))"
+echo "Data loader: sharded, workers per rank=${NUM_WORKERS:-12}, decoder threads=1"
+echo "ATQ checkpoint=$BASE_MODEL_PATH data=$DATA_DIR speed=$SPEED rotation=$ROTATION_MERGE init_experts_from_main=$INIT_EXPERTS_FROM_MAIN tau=$TAU global_batch=$GLOBAL_BATCH_SIZE GPUs=$NUM_GPUS accumulation=$GRAD_ACCUM microbatch=$((GLOBAL_BATCH_SIZE / NUM_GPUS / GRAD_ACCUM))"
 exec "$BASE_DIR/.venv/bin/torchrun" --standalone --nnodes=1 --nproc_per_node="$NUM_GPUS" \
     rldx/experiment/launch_train.py \
     --base-model-path "$BASE_MODEL_PATH" --video-length 1 --n-cog-tokens 64 --action-horizon 16 \
-    --dataset-path "$DATA_DIR" --dataset-mode standard \
-    --dataloader-num-workers "${NUM_WORKERS:-4}" \
+    --dataset-path "$DATA_DIR" --dataset-mode sharded \
+    --dataloader-num-workers "${NUM_WORKERS:-12}" \
     --embodiment-tag GENERAL_EMBODIMENT \
     --modality-config-path "$BASE_DIR/rldx/configs/data/robocasa_conf_config.py" \
     --state-dropout-prob 0.0 --num-gpus "$NUM_GPUS" \
@@ -93,5 +100,5 @@ exec "$BASE_DIR/.venv/bin/torchrun" --standalone --nnodes=1 --nproc_per_node="$N
     --atq-rotation-merge "$ROTATION_MERGE" --atq-rotation-key end_effector_rotation \
     --atq-rotation-controller-scale 0.5 \
     --atq-label-gated --atq-conf-carrier-key ratio_label --atq-conf-threshold "$TAU" \
-    --atq-conf-loss-coef 0.1 --atq-init-experts-from-main \
+    --atq-conf-loss-coef 0.1 "$INIT_FLAG" \
     --output-dir "$OUTPUT_DIR" --experiment-name "$RUN_NAME"

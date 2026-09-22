@@ -3,7 +3,7 @@
 Bakes the VLM speed-confidence label (`prehj/robocasa-ratio-labels-contact`)
 into a copy of the RoboCasa LeRobot dataset as two extra action dims
 `[conf, valid]`. The four scripts are copied unchanged from
-`GR00T-action-quantization/scripts` (branch `jimin-dev-ATQ-finalized-only`);
+`GR00T-action-quantization/scripts` (branch `jimin-dev-label-gated`);
 they operate on the LeRobot layout only and need `numpy`, `pyarrow`,
 `huggingface_hub`.
 

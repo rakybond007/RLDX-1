@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """ATQ label-gated variable-horizon MoE — pure-torch helpers.
 
-Ported from GR00T-action-quantization (branch ``jimin-dev-ATQ-finalized-only``,
+Ported from GR00T-action-quantization (branch ``jimin-dev-label-gated``,
 ``gr00t/model/action_head/flow_matching_action_head.py`` and
 ``rotation_gt.py``) onto RLDX-1's MSAT action model.  Everything in this file
 is framework-free (torch + math only) so it can be unit-tested on CPU without
