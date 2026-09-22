@@ -45,6 +45,13 @@ export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS=1
+# NCCL 2.26.2 lacks the host-cuMem allocation fallback added in 2.26.5.
+# Apply NVIDIA's documented /dev/shm fallback only on the H100 partition.
+# Keep this in the shared runtime script so queued H100 jobs pick it up.
+if [[ "${SLURM_JOB_PARTITION:-}" == h100 ]]; then
+    export NCCL_CUMEM_HOST_ENABLE=0
+    echo 'H100 NCCL: host cuMem disabled; using /dev/shm allocation'
+fi
 export RLDX_COMPILE_RMSNORM="${RLDX_COMPILE_RMSNORM:-1}"
 export RLDX_CPU_ROPE="${RLDX_CPU_ROPE:-1}"
 export RLDX_IMAGE_IDENTITY_FASTPATH="${RLDX_IMAGE_IDENTITY_FASTPATH:-1}"

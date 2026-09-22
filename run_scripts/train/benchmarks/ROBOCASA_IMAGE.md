@@ -320,3 +320,13 @@ NVLS/driver-specific causes are not established. Job 203529 retries the same
 training configuration with H100-only early CUDA memory logging, explicit
 NCCL device binding, a barrier before model setup, and NCCL INFO diagnostics.
 This is a diagnostic retry, not a verified root-cause fix. LIBERO is unchanged.
+
+The installed NCCL is 2.26.2. NVIDIA documents that versions before 2.26.5
+lack automatic fallback when NUMA-dependent cuMem host allocations fail:
+https://docs.nvidia.com/deeplearning/nccl/archives/nccl_2265/user-guide/docs/troubleshooting.html#cumem-host-allocations
+The RoboCasa runtime launcher now sets NCCL_CUMEM_HOST_ENABLE=0 only for the
+h100 partition, using the documented /dev/shm fallback. Pending job 203529
+sources this runtime launcher without cancellation or resubmission. This
+addresses a plausible initialization failure in the installed version; the
+original log alone does not establish host-cuMem as the root cause. Confirm
+CUDA_NCCL_READY and actual training updates before reporting the issue fixed.
