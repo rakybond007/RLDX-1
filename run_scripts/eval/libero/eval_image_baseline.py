@@ -1,0 +1,112 @@
+"""LIBERO benchmark: official initial states, suite horizons, replan five."""
+import argparse
+from collections import deque
+import json
+import os
+from pathlib import Path
+import random
+import time
+
+os.environ["RLDX_SKIP_HF_REGISTRATION"] = "1"
+
+import imageio.v2 as imageio
+import numpy as np
+import torch
+from libero.libero import benchmark, get_libero_path
+from rldx.eval.sim.LIBERO.libero_env import LiberoEnv
+from rldx.policy.server_client import PolicyClient
+
+HORIZONS = {'libero_spatial': 220, 'libero_object': 280, 'libero_goal': 300, 'libero_10': 520}
+ACTION_KEYS = ('x', 'y', 'z', 'roll', 'pitch', 'yaw', 'gripper')
+
+
+def pack_observation(obs):
+    return {k: ([v] if k.startswith('annotation.') else np.asarray(v)[None, None])
+            for k, v in obs.items()}
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--suite', choices=HORIZONS, required=True)
+    p.add_argument('--port', type=int, required=True)
+    p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--episodes', type=int, default=50)
+    p.add_argument('--replan-steps', type=int, default=5)
+    p.add_argument('--seed', type=int, default=7)
+    p.add_argument('--task-index', type=int, default=-1)
+    a = p.parse_args()
+    assert a.replan_steps == 5, 'This baseline uses replan_steps=5'
+    assert 1 <= a.episodes <= 50
+    random.seed(a.seed)
+    np.random.seed(a.seed)
+    a.output.mkdir(parents=True, exist_ok=True)
+    client = PolicyClient(host='127.0.0.1', port=a.port, timeout_ms=2000, strict=False)
+    deadline = time.monotonic() + 1200
+    while not client.ping():
+        if time.monotonic() > deadline:
+            raise RuntimeError('Policy server readiness timed out')
+        time.sleep(2)
+    client.timeout_ms = 120000
+    client._init_socket()
+    suite = benchmark.get_benchmark_dict()[a.suite]()
+    results = []
+    tasks = range(suite.n_tasks) if a.task_index < 0 else [a.task_index]
+    for task_id in tasks:
+        task = suite.get_task(task_id)
+        # Official LIBERO files contain NumPy arrays; torch 2.6 changed the
+        # default to weights_only=True. These are the trusted local assets.
+        initial_states = torch.load(
+            Path(get_libero_path('init_states')) / task.problem_folder / task.init_states_file,
+            weights_only=False,
+        )
+        assert len(initial_states) >= a.episodes
+        env = LiberoEnv(str(Path(get_libero_path('bddl_files')) / task.problem_folder / task.bddl_file), task.language)
+        env._env.seed(a.seed)
+        try:
+            for episode in range(a.episodes):
+                env.reset()
+                raw = env._env.set_init_state(initial_states[episode])
+                for _ in range(10):
+                    raw, _, _, _ = env._env.step([0.0] * 6 + [-1.0])
+                obs = env._process_observation(raw)
+                client.reset()
+                actions = deque()
+                success = False
+                frames = []
+                calls = 0
+                for step in range(HORIZONS[a.suite]):
+                    if episode == 0:
+                        frames.append(obs['video.image'].copy())
+                    if not actions:
+                        predicted, _ = client.get_action(pack_observation(obs))
+                        for k in ACTION_KEYS:
+                            value = predicted['action.' + k]
+                            assert value.shape[0] == 1 and value.shape[1] >= a.replan_steps
+                            assert np.isfinite(value).all(), k
+                        for t in range(a.replan_steps):
+                            actions.append({'action.' + k: predicted['action.' + k][0, t].copy() for k in ACTION_KEYS})
+                        calls += 1
+                    obs, _, done, truncated, info = env.step(actions.popleft())
+                    success = bool(info.get('success', False))
+                    if success or done or truncated:
+                        break
+                result = dict(suite=a.suite, task_id=task_id, task=task.name, episode=episode,
+                              initial_state_id=episode, success=success, steps=step + 1,
+                              policy_calls=calls, replan_steps=a.replan_steps, seed=a.seed)
+                results.append(result)
+                with (a.output / 'episodes.jsonl').open('a') as f:
+                    f.write(json.dumps(result) + '\n')
+                print('EVAL_EPISODE ' + json.dumps(result), flush=True)
+                if frames:
+                    imageio.mimsave(a.output / f'{task_id:02d}_episode0_{success}.mp4', frames, fps=20)
+        finally:
+            env.close()
+    summary = dict(suite=a.suite, episodes=len(results), successes=sum(r['success'] for r in results),
+                   success_rate=sum(r['success'] for r in results) / len(results), replan_steps=a.replan_steps,
+                   seed=a.seed, max_episode_steps=HORIZONS[a.suite], settling_steps=10)
+    (a.output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+    print('EVAL_SUMMARY ' + json.dumps(summary), flush=True)
+
+
+if __name__ == '__main__':
+    main()

@@ -140,6 +140,7 @@ cython_debug/
 
 # Virtual environments
 .venv/
+.venv-libero-eval/
 .venv/*
 env/
 venv/

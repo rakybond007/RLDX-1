@@ -15,6 +15,7 @@ reach the underlying classes without sub-module knowledge.
 """
 
 from importlib import import_module
+import os
 from typing import TYPE_CHECKING
 
 
@@ -63,4 +64,7 @@ if TYPE_CHECKING:
 # import. ``rldx.model.core.rldx`` runs ``AutoConfig.register("RLDX-1", ...)``
 # and ``AutoModel.register(...)``; ``rldx.model.core.processing_rldx`` runs
 # ``AutoProcessor.register(...)``.
-from rldx.model.core import processing_rldx as _processing_rldx, rldx as _rldx  # noqa: E402, F401
+# Remote simulator clients need the wire protocol and environment wrappers,
+# not the model's Transformers/FlashAttention dependency stack.
+if os.environ.get("RLDX_SKIP_HF_REGISTRATION") != "1":
+    from rldx.model.core import processing_rldx as _processing_rldx, rldx as _rldx  # noqa: E402, F401

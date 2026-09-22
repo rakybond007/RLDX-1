@@ -193,7 +193,12 @@ class PolicyClient(BasePolicy):
 
     def _init_socket(self):
         """Initialize or reinitialize the socket with current settings"""
+        if hasattr(self, "socket"):
+            self.socket.close(linger=0)
         self.socket = self.context.socket(zmq.REQ)
+        self.socket.setsockopt(zmq.LINGER, 0)
+        self.socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        self.socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
         self.socket.connect(f"tcp://{self.host}:{self.port}")
 
     def ping(self) -> bool:
