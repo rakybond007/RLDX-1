@@ -168,6 +168,16 @@ def run(config: Config):
     pipeline.setup()  # create model, dataset, and data collator
 
     model = pipeline.return_model()
+    if os.environ.get("RLDX_COMPILE_RMSNORM") == "1":
+        from rldx.utils.training_kernels import set_compiled_text_norms
+
+        count = set_compiled_text_norms(model)
+        _print(f"[i] Compiled residual-stream RMSNorm kernels: {count}")
+    if os.environ.get("RLDX_CPU_ROPE") == "1":
+        from rldx.utils.training_kernels import enable_cpu_rope_metadata
+
+        count = enable_cpu_rope_metadata(model)
+        _print(f"[i] CPU RoPE metadata preparation enabled: {count}")
     train_dataset, eval_dataset = pipeline.return_dataset()
     data_collator = pipeline.return_collator()
     processor = pipeline.return_processor()
@@ -228,6 +238,14 @@ def run(config: Config):
         data_collator=data_collator,
         multiprocessing_context=config.data.multiprocessing_context,
     )
+    if os.environ.get("RLDX_REFRESH_SAVE_INTERVAL") == "1":
+        from rldx.utils.training_kernels import ResumeSaveInterval
+
+        trainer.add_callback(ResumeSaveInterval())
+    if os.environ.get("RLDX_LOG_THROUGHPUT") == "1":
+        from rldx.utils.training_kernels import TrainingThroughput
+
+        trainer.add_callback(TrainingThroughput())
 
     trainer.add_callback(
         CheckpointFormatCallback(

@@ -29,6 +29,10 @@ fi
 NUM_GPUS=2
 GLOBAL_BATCH_SIZE=64
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
+if [[ "$GRAD_ACCUM" != 1 ]]; then
+    echo 'This baseline requires GRAD_ACCUM=1: the pinned DeepSpeed 0.17.6 has a known ZeRO-2 accumulation bug (#7718).' >&2
+    exit 1
+fi
 MAX_STEPS="${MAX_STEPS:-60000}"
 RUN_NAME="${RUN_NAME:-rldx1_img_robocasa_gb64_60k_baseline}"
 OUTPUT_DIR="${OUTPUT_DIR:-${MODEL_OUTPUT_DIR:-$BASE_DIR/outputs}}"
@@ -38,23 +42,34 @@ OUTPUT_DIR="${OUTPUT_DIR:-${MODEL_OUTPUT_DIR:-$BASE_DIR/outputs}}"
 }
 export NO_ALBUMENTATIONS_UPDATE=1
 export TOKENIZERS_PARALLELISM=false
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS=1
+export RLDX_COMPILE_RMSNORM="${RLDX_COMPILE_RMSNORM:-1}"
+export RLDX_CPU_ROPE="${RLDX_CPU_ROPE:-1}"
+export RLDX_REFRESH_SAVE_INTERVAL=1
+export RLDX_LOG_THROUGHPUT=1
+export NCCL_PROTO="${NCCL_PROTO:-Simple}"
 export WANDB_MODE="${WANDB_MODE:-disabled}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$BASE_DIR/.cache/uv}"
 export HF_HOME="${HF_HOME:-$BASE_DIR/.cache/huggingface}"
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$BASE_DIR/.cache/triton}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$BASE_DIR/.cache/torchinductor}"
 export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-$BASE_DIR/.cache/torch_extensions}"
 # Invoke the installed environment directly: training must not resolve/install packages.
 export PATH="$BASE_DIR/.venv/bin:$PATH"
+echo "Data loader: sharded, workers per rank=${NUM_WORKERS:-12}, decoder threads=1"
+echo "Training kernels: compiled RMSNorm=$RLDX_COMPILE_RMSNORM CPU RoPE=$RLDX_CPU_ROPE NCCL=$NCCL_PROTO save interval=${SAVE_STEPS:-2000}"
 echo "Image checkpoint=$BASE_MODEL_PATH frames=1 global_batch=$GLOBAL_BATCH_SIZE GPUs=$NUM_GPUS accumulation=$GRAD_ACCUM microbatch=$((GLOBAL_BATCH_SIZE / NUM_GPUS / GRAD_ACCUM))"
 exec "$BASE_DIR/.venv/bin/torchrun" --standalone --nnodes=1 --nproc_per_node="$NUM_GPUS" \
-    rldx/experiment/launch_train.py \
+    "${TRAIN_ENTRYPOINT:-rldx/experiment/launch_train.py}" \
     --base-model-path "$BASE_MODEL_PATH" --video-length 1 --n-cog-tokens 64 --action-horizon 16 \
-    --dataset-path "$DATA_DIR" --dataset-mode standard \
-    --dataloader-num-workers "${NUM_WORKERS:-4}" \
+    --dataset-path "$DATA_DIR" --dataset-mode sharded \
+    --dataloader-num-workers "${NUM_WORKERS:-12}" \
     --embodiment-tag GENERAL_EMBODIMENT \
     --modality-config-path "$BASE_DIR/rldx/configs/data/robocasa_config.py" \
+    --rtc-training-max-delay 0 --rtc-inference-mode none \
     --state-dropout-prob 0.0 --num-gpus "$NUM_GPUS" \
     --global-batch-size "$GLOBAL_BATCH_SIZE" --gradient-accumulation-steps "$GRAD_ACCUM" \
-    --max-steps "$MAX_STEPS" --save-steps "${SAVE_STEPS:-1000}" --save-total-limit 2 \
+    --max-steps "$MAX_STEPS" --save-steps "${SAVE_STEPS:-2000}" --save-total-limit 2 \
     --output-dir "$OUTPUT_DIR" --experiment-name "$RUN_NAME"

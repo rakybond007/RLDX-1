@@ -20,6 +20,7 @@ class LayerWrapper(nn.Module):
         self.internal_projection = internal_projection
         self.motion_token = motion_token
         self.img_pattern = img_pattern
+        self.image_identity_fastpath = os.environ.get("RLDX_IMAGE_IDENTITY_FASTPATH") == "1"
         assert motion_token == 1
 
     def get_removing_indices(self, hidden_states, input_ids, num_views=None):
@@ -76,6 +77,19 @@ class LayerWrapper(nn.Module):
         )
         if self.layer_idx == self.internal_projection and not is_incremental:
             device = hidden_states.device
+
+            # One image per view makes begin_idx == end_idx for every sample.
+            # The original concatenate/pad path is then exactly the identity,
+            # including its backward pass. Keep video/motion cases unchanged.
+            motion_info = kwargs.get("motion_drop_info")
+            if (self.image_identity_fastpath and num_views is not None
+                    and (motion_info is None or motion_info["count"] == 0)):
+                windows = input_ids.unfold(1, len(self.img_pattern), 1)
+                pattern = input_ids.new_tensor(self.img_pattern)
+                counts = (windows == pattern).all(-1).sum(-1)
+                views = torch.as_tensor(num_views, device=device).reshape(-1)
+                if bool(((counts == views) & (counts > 0)).all()):
+                    return self.layer(hidden_states, *args, **kwargs), kwargs
 
             token_indices = torch.arange(seq_len, device=device).view(1, -1).expand(bsz, -1)
             begin_idx, end_idx = self.get_removing_indices(

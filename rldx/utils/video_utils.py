@@ -290,7 +290,12 @@ def get_frames_by_indices(
         if not TORCHCODEC_AVAILABLE:
             raise ImportError("torchcodec is not available.")
         decoder = torchcodec.decoders.VideoDecoder(
-            video_path, device="cpu", dimension_order="NHWC", num_ffmpeg_threads=0
+            video_path,
+            device="cpu",
+            dimension_order="NHWC",
+            # Parallelism is provided by DataLoader workers; auto decoder
+            # threading oversubscribes the allocated CPUs at high worker counts.
+            num_ffmpeg_threads=video_backend_kwargs.get("num_ffmpeg_threads", 1),
         )
         return decoder.get_frames_at(indices=indices).data.numpy()
     elif video_backend == "ffmpeg":
@@ -343,7 +348,12 @@ def get_frames_by_timestamps(
         if not TORCHCODEC_AVAILABLE:
             raise ImportError("torchcodec is not available.")
         decoder = torchcodec.decoders.VideoDecoder(
-            video_path, device="cpu", dimension_order="NHWC", num_ffmpeg_threads=0
+            video_path,
+            device="cpu",
+            dimension_order="NHWC",
+            # Parallelism is provided by DataLoader workers; auto decoder
+            # threading oversubscribes the allocated CPUs at high worker counts.
+            num_ffmpeg_threads=video_backend_kwargs.get("num_ffmpeg_threads", 1),
         )
 
         # https://docs.pytorch.org/torchcodec/stable/generated/torchcodec.decoders.VideoStreamMetadata.html#torchcodec.decoders.VideoStreamMetadata
@@ -451,7 +461,12 @@ def get_all_frames(
         if not TORCHCODEC_AVAILABLE:
             raise ImportError("torchcodec is not available.")
         decoder = torchcodec.decoders.VideoDecoder(
-            video_path, device="cpu", dimension_order="NHWC", num_ffmpeg_threads=0
+            video_path,
+            device="cpu",
+            dimension_order="NHWC",
+            # Parallelism is provided by DataLoader workers; auto decoder
+            # threading oversubscribes the allocated CPUs at high worker counts.
+            num_ffmpeg_threads=video_backend_kwargs.get("num_ffmpeg_threads", 1),
         )
         frames = decoder.get_frames_at(indices=range(len(decoder)))
         return frames.data.numpy(), frames.pts_seconds.numpy()
