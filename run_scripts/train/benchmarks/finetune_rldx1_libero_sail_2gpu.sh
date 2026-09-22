@@ -72,11 +72,24 @@ WANDB_ARGS=()
 if [[ "${USE_WANDB:-0}" == 1 ]]; then
     WANDB_ARGS=(--use-wandb --wandb-project "${WANDB_PROJECT:-rldx1_sail}")
 fi
+# Dataset ordering. `standard` shuffles globally (DistributedSampler), which defeats the
+# single-episode cache in StandardSingleStepDataset: every sample decodes a whole episode
+# to use one frame. `sharded` groups an episode's steps into the same shard, so one decode
+# serves ~100 samples. It drops no data -- a 288-step episode splits into 10 interleaved
+# groups totalling 288, with no overlap and no gaps.
+# Measured 2026-09-22, h200-03-w-abf8, RoboCasa 60k, 2 GPU / 28 cpu / global batch 64:
+#   standard  3.23 s/it   cpu 28.0/28 (73.6% throttled)   gpu0 31.9% (idle 44.2%)
+#   sharded   0.83 s/it   cpu  3.5/28 (13.9% throttled)   gpu0 80.1% (idle  0.0%)
+#   -> 4.2x, and the async dataloader finally hides decoding instead of starving the GPU.
+# sharded is the default, matching TrainConfig. Set DATASET_MODE=standard only to
+# reproduce a run that was launched under the old hardcoded ordering.
+DATASET_MODE="${DATASET_MODE:-sharded}"
+
 echo "Image checkpoint=$BASE_MODEL_PATH frames=1 global_batch=$GLOBAL_BATCH_SIZE GPUs=$NUM_GPUS accumulation=$GRAD_ACCUM microbatch=$((GLOBAL_BATCH_SIZE / NUM_GPUS / GRAD_ACCUM))"
 exec "$BASE_DIR/.venv/bin/torchrun" --standalone --nnodes=1 --nproc_per_node="$NUM_GPUS" \
     rldx/experiment/launch_train.py \
     --base-model-path "$BASE_MODEL_PATH" --video-length 1 --n-cog-tokens 64 --action-horizon 16 \
-    --dataset-path "$DATA_DIR" --dataset-mode standard \
+    --dataset-path "$DATA_DIR" --dataset-mode "$DATASET_MODE" \
     --dataloader-num-workers "${NUM_WORKERS:-4}" \
     --embodiment-tag GENERAL_EMBODIMENT \
     --modality-config-path "$BASE_DIR/rldx/configs/data/libero_sail_config.py" \
