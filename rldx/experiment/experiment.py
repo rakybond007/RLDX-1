@@ -100,7 +100,19 @@ def run(config: Config):
 
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=72000))
+        if os.environ.get("RLDX_EARLY_CUDA_CHECK") == "1":
+            free, total = torch.cuda.mem_get_info(local_rank)
+            print(f"CUDA_START local_rank={local_rank} device={torch.cuda.get_device_name(local_rank)} "
+                  f"free_gib={free / 2**30:.3f} total_gib={total / 2**30:.3f} "
+                  f"visible_devices={os.environ.get('CUDA_VISIBLE_DEVICES')}", flush=True)
+            dist.init_process_group(
+                backend="nccl", timeout=datetime.timedelta(seconds=72000),
+                device_id=torch.device("cuda", local_rank),
+            )
+            dist.barrier(device_ids=[local_rank])
+            print(f"CUDA_NCCL_READY local_rank={local_rank}", flush=True)
+        else:
+            dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=72000))
         # only meaningful for torchrun, for ray it is always 0
         global_rank = dist.get_rank()
     else:

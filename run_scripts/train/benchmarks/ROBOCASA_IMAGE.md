@@ -312,3 +312,11 @@ Each phase measured 30 updates after 10 warmup updates. This demonstrates
 improved sample throughput with larger batches; step time does not scale
 linearly with batch size. These are PCIe measurements, not H100 forecasts.
 No updates from this variable-batch probe were saved into the baseline.
+
+H100 job 203408 failed after 5m18s with CUDA out-of-memory at the first
+NCCL dataset-statistics barrier, before any training update. The log confirms
+2x H100 80GB but does not record free memory at failure; batch-size OOM and
+NVLS/driver-specific causes are not established. Job 203529 retries the same
+training configuration with H100-only early CUDA memory logging, explicit
+NCCL device binding, a barrier before model setup, and NCCL INFO diagnostics.
+This is a diagnostic retry, not a verified root-cause fix. LIBERO is unchanged.

@@ -16,7 +16,9 @@ export RUN_NAME=rldx1_img_robocasa_gb64_60k_baseline
 export MAX_STEPS=60000
 export GRAD_ACCUM=1
 export TRAIN_ENTRYPOINT=rldx/experiment/launch_train.py
+export RLDX_EARLY_CUDA_CHECK=1
+export NCCL_DEBUG=INFO
 printf 'H100 training: GPUs=2 CPUs=partition-default workers/rank=%s\n' "$NUM_WORKERS"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used,memory.free --format=csv,noheader
 nvidia-smi topo -m
 exec bash run_scripts/train/benchmarks/finetune_rldx1_robocasa_image_2gpu.sh
