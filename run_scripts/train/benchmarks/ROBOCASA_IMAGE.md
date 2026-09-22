@@ -267,10 +267,48 @@ Use a separate output directory and `TRAIN_ENTRYPOINT` to invoke it.
 
 Allocation 203166 has A100 PCIe GPUs without NVLink, whereas the resumed
 LIBERO allocation has A100 SXM GPUs. Cross-run timing is therefore not a
-controlled comparison. The requested 16-hour/60k target corresponds to
-0.96 seconds/update including checkpoint overhead; the current ~2-second
-PCIe measurements have not established that target. The GR00T N1.5 reference
+controlled comparison. The user's GR00T 16-hour/60k reference corresponds to
+0.96 seconds/update including checkpoint overhead, but is not a required
+RLDX timing target. Likewise, matching LIBERO step time is not the goal:
+identify avoidable overhead and justify the remaining cost with measurements.
+The GR00T N1.5 reference
 script uses a frozen LLM/vision tower, while RLDX trains its top four LLM
 layers and cognition embeddings. Preserve that parameter selection during
 optimization; it is a workload difference, not evidence that current speed
 is optimal.
+
+The image identity A/B completed 140 updates (3650 to 3790). Excluding
+transition/warmup updates, ON/OFF/ON measured 2.042185 / 2.124848 / 2.085250
+seconds/update. The average ON interval is 2.063718 seconds (31.01 samples/s),
+about 2.88% faster than OFF. Final loss was 0.0795 and grad norm 0.291827.
+The RoboCasa launcher now enables the identity path by default; the underlying
+module remains opt-in for all other launchers. This is a modest improvement,
+not an explanation of the full performance gap. Held Slurm job 203329 was
+submitted before this flag was added; replace its script snapshot before
+releasing any production job. Both RoboCasa jobs remain held for review of
+performance; running LIBERO was not changed.
+
+### H100 submission (2026-09-22)
+
+After the previous jobs were cancelled, LIBERO was resubmitted as job 203406
+with its existing premium recipe (2 GPUs, global 32, workers 8/rank), resuming
+the complete production checkpoint 21000. RoboCasa was submitted as job
+203408 using `finetune_rldx1_robocasa_image_h100_2gpu.sh`: H100 partition,
+2 GPUs, global 64, accumulation 1, sharded loader, workers 32/rank, and the
+verified production checkpoint 3650. Both retain a 60000-step schedule.
+CPU allocation is left entirely to the partition defaults as requested.
+The cluster requires MODEL_OUTPUT_DIR in the submission environment and a
+job name of at least 50 characters; it rejects explicit cpus-per-task.
+
+The disposable PCIe batch-scaling probe completed before cancellation:
+
+| Samples/rank | Global batch | Seconds/update | Samples/second |
+|---|---|---|---|
+| 8 | 16 | 1.092128 | 14.6503 |
+| 16 | 32 | 1.396660 | 22.9118 |
+| 32 | 64 | 2.053756 | 31.1624 |
+
+Each phase measured 30 updates after 10 warmup updates. This demonstrates
+improved sample throughput with larger batches; step time does not scale
+linearly with batch size. These are PCIe measurements, not H100 forecasts.
+No updates from this variable-batch probe were saved into the baseline.

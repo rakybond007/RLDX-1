@@ -47,6 +47,7 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS=1
 export RLDX_COMPILE_RMSNORM="${RLDX_COMPILE_RMSNORM:-1}"
 export RLDX_CPU_ROPE="${RLDX_CPU_ROPE:-1}"
+export RLDX_IMAGE_IDENTITY_FASTPATH="${RLDX_IMAGE_IDENTITY_FASTPATH:-1}"
 export RLDX_REFRESH_SAVE_INTERVAL=1
 export RLDX_LOG_THROUGHPUT=1
 export NCCL_PROTO="${NCCL_PROTO:-Simple}"
@@ -59,7 +60,7 @@ export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-$BASE_DIR/.cache/torch_exte
 # Invoke the installed environment directly: training must not resolve/install packages.
 export PATH="$BASE_DIR/.venv/bin:$PATH"
 echo "Data loader: sharded, workers per rank=${NUM_WORKERS:-12}, decoder threads=1"
-echo "Training kernels: compiled RMSNorm=$RLDX_COMPILE_RMSNORM CPU RoPE=$RLDX_CPU_ROPE NCCL=$NCCL_PROTO save interval=${SAVE_STEPS:-2000}"
+echo "Training kernels: compiled RMSNorm=$RLDX_COMPILE_RMSNORM CPU RoPE=$RLDX_CPU_ROPE image identity=$RLDX_IMAGE_IDENTITY_FASTPATH NCCL=$NCCL_PROTO save interval=${SAVE_STEPS:-2000}"
 echo "Image checkpoint=$BASE_MODEL_PATH frames=1 global_batch=$GLOBAL_BATCH_SIZE GPUs=$NUM_GPUS accumulation=$GRAD_ACCUM microbatch=$((GLOBAL_BATCH_SIZE / NUM_GPUS / GRAD_ACCUM))"
 exec "$BASE_DIR/.venv/bin/torchrun" --standalone --nnodes=1 --nproc_per_node="$NUM_GPUS" \
     "${TRAIN_ENTRYPOINT:-rldx/experiment/launch_train.py}" \
