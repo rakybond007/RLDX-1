@@ -287,6 +287,63 @@ class RLDXConfig(PretrainedConfig):
     # Multi-embodiment parameters
     max_num_embodiments: int = 36
 
+    # ── ATQ label-gated variable-horizon MoE ──────────────────────────────
+    # Port of GR00T-action-quantization's label-gated ATQ onto MSAT. Four
+    # experts share the MSAT body and differ only in the horizon the body is
+    # run at and in a private CategorySpecificMLP decoder:
+    #   0 main (16 rows)  1 m8 (16 steps compressed)  2 m4 (8 steps compressed)
+    #   3 n8 (8 raw rows).  See rldx/model/modules/action_model/atq.py and
+    # docs/atq_label_gated_moe.md.  All off unless ``use_atq_moe=True``.
+    use_atq_moe: bool = False
+    atq_speed: float = 2.0
+    """Compression speed of the compressed group: 2.0 (integer factor) or one of
+    the hardcoded 16-step block plans 2.5 / 1.67 / 3.0."""
+    atq_block_plan_full: str = ""
+    """Explicit block plan for the full-span compressed expert (m8), e.g.
+    '2,3,2,3,2,3'. Empty = use the plan ``atq_speed`` selects."""
+    atq_block_plan_half: str = ""
+    """Explicit block plan for the half-span compressed expert (m4), e.g. '2,3,3'."""
+    atq_discrete_action_dims: list[int] = field(default_factory=list)
+    """Indices (in the concatenated action vector) that take the block's LAST
+    value instead of the sum when compressing (gripper, control_mode)."""
+    atq_action_merge_reduction: str = "sum"
+    """'sum' (delta-action spaces) or 'last' (absolute-action spaces)."""
+    atq_rotation_merge: str = "legacy"
+    """'legacy' sums axis-angle rotation deltas; 'so3' composes them on SO(3)."""
+    atq_rotation_key: str = "end_effector_rotation"
+    """Action modality key holding the 3-dim axis-angle delta (so3 only)."""
+    atq_rotation_controller_scale: float = 0.5
+    """Radians per raw rotation-action unit of the OSC controller (so3 only)."""
+    atq_rotation_merge_spec: dict | None = None
+    """Filled by the training pipeline from the dataset normaliser (so3 only);
+    persisted so inference rebuilds the same RotationGT."""
+    # Router / mixture
+    atq_router_hidden: int = 256
+    atq_router_temp: float = 0.5
+    atq_target_temp: float = 0.3
+    atq_balance_weight: float = 0.05
+    atq_supervise_weight: float = 0.1
+    atq_router_warmup_steps: int = 5000
+    atq_min_prob: float = 0.05
+    # Label gate (conf head)
+    atq_label_gated: bool = True
+    """True: the conf label decides compress-vs-fine and the router only ranks
+    horizons inside the group (inference-time gate). False: original ATQ free
+    4-way routing, no conf head."""
+    atq_conf_carrier_key: str = "ratio_label"
+    """Action modality key carrying ``[conf, valid]`` baked into the dataset.
+    The processor strips it before normalisation and emits conf_target/conf_valid."""
+    atq_conf_threshold: float = 0.5
+    """conf_pred >= tau selects the compressed group at inference (eval knob)."""
+    atq_conf_loss_coef: float = 0.1
+    atq_conf_readout_detach: bool = True
+    atq_init_experts_from_main: bool = True
+    """Initialise m8/m4/n8 decoders from the pretrained main decoder when they
+    are absent from the base checkpoint."""
+    # Inference
+    atq_inference_temp: float = 0.7
+    atq_inference_stochastic: bool = False
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         for key, value in kwargs.items():

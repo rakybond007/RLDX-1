@@ -223,10 +223,17 @@ class RLDXProcessor(BaseProcessor):
         physics_keys: list[str] | None = None,
         physics_dims: list[int] | None = None,
         allow_missing_physics: bool = False,
+        conf_carrier_key: str | None = None,
     ):
         self.physics_keys = physics_keys or []
         self.physics_dims = physics_dims or []
         self.allow_missing_physics = allow_missing_physics
+        # ATQ label carrier: an action modality key whose two dims hold
+        # ``[conf, valid]`` baked into the dataset. Stripped in __call__ before
+        # normalisation (same stage as GR00T's ConfGR00TTransform) and re-emitted
+        # as ``conf_target`` / ``conf_valid``; excluded from the concatenated
+        # action tensor, from decode_action and from the action-dim bookkeeping.
+        self.conf_carrier_key = conf_carrier_key
 
         # Pre-compute physics temporal length for zero-filling when data is missing
         self._physics_t_len = 0
@@ -258,6 +265,9 @@ class RLDXProcessor(BaseProcessor):
             apply_sincos_state_encoding=apply_sincos_state_encoding,
             use_relative_action=use_relative_action,
         )
+
+        if self.conf_carrier_key:
+            self.state_action_processor.skip_action_keys.add(self.conf_carrier_key)
 
         # Save state action processor settings
         self.use_percentiles = use_percentiles
@@ -338,28 +348,66 @@ class RLDXProcessor(BaseProcessor):
                 embodiment_tag
             )
 
+    def action_keys(self, embodiment_tag: EmbodimentTag | str) -> list[str]:
+        """Action modality keys that are real robot actions (conf carrier excluded)."""
+        tag = embodiment_tag.value if isinstance(embodiment_tag, EmbodimentTag) else embodiment_tag
+        keys = self.modality_configs[tag]["action"].modality_keys
+        if self.conf_carrier_key:
+            keys = [k for k in keys if k != self.conf_carrier_key]
+        return list(keys)
+
     def decode_action(
         self,
         action: np.ndarray,
         embodiment_tag: EmbodimentTag,
         state: dict[str, np.ndarray] | None = None,
+        block_sizes: list[int] | None = None,
+        sum_exempt_dims: list[int] | None = None,
     ):
-        """Undo action normalization and convert relative actions to absolute."""
+        """Undo action normalization and convert relative actions to absolute.
+
+        Args:
+            action: ``(..., T, max_action_dim)`` normalised model output.
+            embodiment_tag: embodiment whose modality config / stats to use.
+            state: raw states for relative->absolute conversion (if configured).
+            block_sizes: ATQ compressed experts only — source steps summed into
+                each of the ``T`` rows. When given, ``T`` must equal
+                ``len(block_sizes)`` and the k-corrected unclipped inverse is used.
+            sum_exempt_dims: concatenated-action indices that were NOT summed
+                (discrete last-of-block dims, SO(3)-composed rotation dims).
+        """
         # Split concatenated action into joint groups
         out_dict = {}
+        exempt_by_group: dict[str, list[int]] = {}
         start_idx = 0
-        joint_groups = self.modality_configs[embodiment_tag.value]["action"].modality_keys
-        action_horizon = len(self.modality_configs[embodiment_tag.value]["action"].delta_indices)
+        joint_groups = self.action_keys(embodiment_tag)
+        if block_sizes is not None:
+            action_horizon = len(block_sizes)
+            if action.shape[-2] < action_horizon:
+                raise ValueError(
+                    f"decode_action: action has {action.shape[-2]} rows but block_sizes "
+                    f"has {action_horizon} entries"
+                )
+        else:
+            action_horizon = len(self.modality_configs[embodiment_tag.value]["action"].delta_indices)
+        exempt = set(int(d) for d in (sum_exempt_dims or []))
         for key in joint_groups:
             joint_dim = self.state_action_processor.norm_params[embodiment_tag.value]["action"][
                 key
             ]["dim"].item()
             out_dict[key] = action[..., :action_horizon, start_idx : start_idx + joint_dim]
+            local = [d - start_idx for d in exempt if start_idx <= d < start_idx + joint_dim]
+            if local:
+                exempt_by_group[key] = local
             start_idx += joint_dim
 
         # Use StateActionProcessor to unnormalize and convert to absolute
         return self.state_action_processor.unapply_action(
-            out_dict, embodiment_tag.value, state=state
+            out_dict,
+            embodiment_tag.value,
+            state=state,
+            block_sizes=block_sizes,
+            sum_exempt_dims=exempt_by_group if block_sizes is not None else None,
         )
 
     def _apply_vlm_processing(
@@ -419,6 +467,30 @@ class RLDXProcessor(BaseProcessor):
         action_data = content.actions
         state_data = content.states
 
+        # ATQ conf label carrier: strip it BEFORE normalisation (it is a label in
+        # [0, 1], not a robot action, and min-max would remap it to [-1, 1] and
+        # change what the eval threshold tau means). Row 0 is the current step.
+        conf_target = conf_valid = None
+        if self.conf_carrier_key and action_data and self.conf_carrier_key in action_data:
+            carrier = np.asarray(action_data[self.conf_carrier_key], dtype=np.float32)
+            if carrier.ndim != 2 or carrier.shape[-1] != 2:
+                raise ValueError(
+                    f"conf carrier '{self.conf_carrier_key}' must be (T, 2) [conf, valid]; "
+                    f"got {carrier.shape}"
+                )
+            value, valid = float(carrier[0, 0]), float(carrier[0, 1])
+            if valid not in (0.0, 1.0):
+                raise ValueError(f"conf valid mask is not binary: {valid}")
+            if not np.isfinite(value):
+                raise ValueError(f"conf target is not finite: {value}")
+            if not (0.0 <= value <= 1.0):
+                raise ValueError(f"conf target outside [0,1]: {value}")
+            if not valid and value != 0.0:
+                raise ValueError(f"invalid row must carry a zero target, got {value}")
+            action_data = {k: v for k, v in action_data.items() if k != self.conf_carrier_key}
+            conf_target = np.array([value], dtype=np.float32)
+            conf_valid = np.array([valid], dtype=np.float32)
+
         # Use StateActionProcessor to handle relative conversion and normalization
         normalized_states, normalized_actions = self.state_action_processor.apply(
             state=state_data,
@@ -428,7 +500,7 @@ class RLDXProcessor(BaseProcessor):
 
         if normalized_actions:
             # Concatenate actions
-            action_keys = self.modality_configs[embodiment_tag.value]["action"].modality_keys
+            action_keys = self.action_keys(embodiment_tag)
             normalized_actions = torch.cat(
                 [torch.from_numpy(normalized_actions[key]) for key in action_keys], dim=-1
             )  # (t, d)
@@ -507,6 +579,9 @@ class RLDXProcessor(BaseProcessor):
             transformed_inputs["state"] = normalized_states.to(torch.get_default_dtype())
         if normalized_actions is not None:
             transformed_inputs["action"] = normalized_actions.to(torch.get_default_dtype())
+        if conf_target is not None:
+            transformed_inputs["conf_target"] = conf_target
+            transformed_inputs["conf_valid"] = conf_valid
         if action_mask is not None:
             transformed_inputs["action_mask"] = action_mask
 
@@ -697,6 +772,8 @@ class RLDXProcessor(BaseProcessor):
                 # is used by the transform path, so a wrong value degrades
                 # inference without any error surface.
                 "conversation_image_first": self.conversation_image_first,
+                # ATQ conf label carrier key (None when the run has no label).
+                "conf_carrier_key": self.conf_carrier_key,
             },
         }
         with open(main_config_file, "w") as f:
@@ -770,12 +847,18 @@ class RLDXProcessor(BaseProcessor):
                 "formalize_language",
                 "apply_sincos_state_encoding",
                 "conversation_image_first",
+                "conf_carrier_key",
             ]
             for key in override_keys:
                 if key in kwargs:
                     override = kwargs.pop(key)
                     if override is not None:
                         processor_kwargs[key] = override
+            # ``conf_carrier_key`` is the one override where None is meaningful:
+            # a base checkpoint trained without ATQ has no carrier, and a run
+            # that turns ATQ off on top of an ATQ checkpoint must not keep it.
+            if "conf_carrier_key" in kwargs:
+                processor_kwargs["conf_carrier_key"] = kwargs.pop("conf_carrier_key")
         return cls(**processor_kwargs, transformers_loading_kwargs=transformers_loading_kwargs)
 
 

@@ -101,6 +101,7 @@ Hands-on guides live under [`docs/`](docs/):
 | [`installation.md`](docs/installation.md) | Environment setup, simulator venvs, dev tooling, common pitfalls |
 | [`architecture.md`](docs/architecture.md) | Five-stage walkthrough of the RLDX-1 model and its config flags |
 | [`training.md`](docs/training.md) | `launch_train.py` recipes (fine-tune / mid-train), LoRA, training-time RTC, dataset layout |
+| [`atq_label_gated_moe.md`](docs/atq_label_gated_moe.md) | ATQ label-gated variable-horizon MoE: 4-expert MSAT head, conf label dataset, decode of compressed chunks |
 | [`embodiment_tags.md`](docs/embodiment_tags.md) | What `EmbodimentTag` is and how to pick one for a custom robot |
 | [`evaluation.md`](docs/evaluation.md) | RoboCasa / LIBERO / SIMPLER / GR-1 eval, server + rollout split, results aggregation |
 | [`inference_server.md`](docs/inference_server.md) | `run_rldx_server.py` CLI, wire protocol, RTC modes, `--compile` levels, simulator + real-robot deployment |

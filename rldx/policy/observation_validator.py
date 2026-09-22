@@ -43,6 +43,8 @@ class ObservationValidator:
         use_memory: bool = False,
         expected_state_dims: dict[str, int] | None = None,
         expected_action_dims: dict[str, int] | None = None,
+        action_keys: list[str] | None = None,
+        variable_action_horizon: bool = False,
     ) -> None:
         self.modality_configs = modality_configs
         self.require_physics = require_physics
@@ -53,6 +55,12 @@ class ObservationValidator:
         self.use_memory = use_memory
         self.expected_state_dims = expected_state_dims
         self.expected_action_dims = expected_action_dims
+        # Action keys the policy actually emits (ATQ drops the conf label
+        # carrier); None = every key in the action modality config.
+        self.action_keys = action_keys
+        # ATQ experts return 16 / 8 / 6 / 4 / 3-row chunks; skip the fixed
+        # horizon assert but still require a non-empty (B, T, D) array.
+        self.variable_action_horizon = variable_action_horizon
 
     # ------------------------------------------------------------------
     # check_observation
@@ -225,7 +233,12 @@ class ObservationValidator:
         Raises:
             AssertionError on first violation.
         """
-        for action_key in self.modality_configs["action"].modality_keys:
+        action_keys = (
+            self.action_keys
+            if self.action_keys is not None
+            else self.modality_configs["action"].modality_keys
+        )
+        for action_key in action_keys:
             assert action_key in action, f"Action key '{action_key}' must be in action"
             action_arr = action[action_key]
             assert isinstance(action_arr, np.ndarray), (
@@ -239,11 +252,16 @@ class ObservationValidator:
                 f"Action key '{action_key}' must be a numpy array of shape "
                 f"(B, T, D), got {action_arr.shape}"
             )
-            assert action_arr.shape[1] == len(self.modality_configs["action"].delta_indices), (
-                f"Action key '{action_key}'s horizon must be "
-                f"{len(self.modality_configs['action'].delta_indices)}. "
-                f"Got {action_arr.shape[1]}"
-            )
+            if self.variable_action_horizon:
+                assert action_arr.shape[1] >= 1, (
+                    f"Action key '{action_key}' must have at least one row, got {action_arr.shape}"
+                )
+            else:
+                assert action_arr.shape[1] == len(self.modality_configs["action"].delta_indices), (
+                    f"Action key '{action_key}'s horizon must be "
+                    f"{len(self.modality_configs['action'].delta_indices)}. "
+                    f"Got {action_arr.shape[1]}"
+                )
             if self.expected_action_dims is not None:
                 expected = self.expected_action_dims[action_key]
                 assert action_arr.shape[-1] == expected, (

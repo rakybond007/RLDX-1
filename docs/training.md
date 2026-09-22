@@ -100,6 +100,16 @@ command lines:
 All three can be combined in a single run. Canonical scripts:
 [`run_scripts/train/ablations/`](../run_scripts/train/ablations/).
 
+### (c) ATQ label-gated variable-horizon MoE
+
+Four experts (16 / compressed-16 / compressed-8 / 8 rows) share the MSAT
+body; a router picks the horizon and a conf head, trained on a baked VLM
+speed label, decides compress-vs-fine at inference. Enabled with
+`--use-atq-moe` on top of a fine-tune command line; the recipe is
+[`run_scripts/train/benchmarks/finetune_rldx1_robocasa_atq_image_2gpu.sh`](../run_scripts/train/benchmarks/finetune_rldx1_robocasa_atq_image_2gpu.sh)
+and the full description, data preparation and log keys are in
+[`atq_label_gated_moe.md`](atq_label_gated_moe.md).
+
 ## Dataset layout: `meta/modality.json`
 
 Beyond the LeRobot-format parquet/video files, every dataset RLDX-1

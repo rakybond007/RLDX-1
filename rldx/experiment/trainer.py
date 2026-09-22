@@ -327,6 +327,29 @@ class RLDXTrainer(Trainer):
         )
         self.loss = loss
 
+        # Auxiliary scalar diagnostics (ATQ MoE: per-expert losses, router
+        # probabilities, conf regression). HF only logs ``loss``; without this a
+        # silently ungated / label-less run is indistinguishable in the log.
+        if (
+            model.training
+            and self.state.global_step % self.args.logging_steps == 0
+            and hasattr(outputs, "items")
+        ):
+            diag = {
+                k: v
+                for k, v in outputs.items()
+                if (k.startswith("loss_") or k.startswith("atq_"))
+                and torch.is_tensor(v)
+                and v.dim() == 0
+            }
+            if diag:
+                keys = sorted(diag)
+                stacked = torch.stack([diag[k].detach().float() for k in keys]).to(loss.device)
+                gathered = self._nested_gather(stacked.unsqueeze(0))  # (world, n)
+                means = gathered.reshape(-1, len(keys)).mean(dim=0).tolist()
+                if self.args.local_rank in (-1, 0):
+                    self.log({k: float(m) for k, m in zip(keys, means)})
+
         # Accuracy calculation
         if (
             self.state.global_step % self.args.logging_steps == 0

@@ -154,6 +154,72 @@ def unnormalize_values_minmax(normalized_values, params):
     return unnormalized
 
 
+def _block_k_matrix(block_sizes, n_dims, exempt_dims=None):
+    """Per-(row, dim) block-size matrix ``K`` for block-summed action rows.
+
+    ``block_sizes[t]`` source steps were summed into row ``t``; dims listed in
+    ``exempt_dims`` (last-of-block discrete dims, SO(3)-composed rotation dims)
+    were NOT summed and keep ``k = 1``.
+    """
+    k = np.asarray(block_sizes, dtype=np.float64).reshape(-1, 1)  # (T, 1)
+    K = np.broadcast_to(k, (k.shape[0], n_dims)).copy()  # (T, D)
+    if exempt_dims:
+        ex = [int(d) for d in exempt_dims if 0 <= int(d) < n_dims]
+        if ex:
+            K[:, ex] = 1.0
+    return K
+
+
+def unnormalize_values_minmax_blocks(normalized_values, params, block_sizes, exempt_dims=None):
+    """Min-max inverse for rows that are SUMS of ``k`` normalised steps (ATQ compressed experts).
+
+    RLDX normalises ``x' = a*x + b`` with ``a = 2/(max-min)``, ``b = -(max+min)/(max-min)``.
+    A row built as ``sum_{i<k} x'_i`` equals ``a*sum(x) + k*b``, so the exact inverse is
+    ``sum(x) = (y - k*b)/a = y*(max-min)/2 + k*(max+min)/2``.  Unlike
+    :func:`unnormalize_values_minmax` this does NOT clip to [-1, 1]: a k-sum legitimately
+    lives in [-k, k].
+
+    Args:
+        normalized_values: ``(T, D)`` or ``(B, T, D)``.
+        params: dict with ``"min"``/``"max"`` of shape ``(D,)``.
+        block_sizes: length-``T`` sequence of source steps per row.
+        exempt_dims: dims that were not summed (use ``k = 1``).
+    """
+    min_vals = np.asarray(params["min"], dtype=np.float64)
+    max_vals = np.asarray(params["max"], dtype=np.float64)
+    values = np.asarray(normalized_values, dtype=np.float64)
+    T, D = values.shape[-2], values.shape[-1]
+    if len(block_sizes) != T:
+        raise ValueError(f"block_sizes has {len(block_sizes)} rows but values have T={T}")
+    K = _block_k_matrix(block_sizes, D, exempt_dims)  # (T, D)
+    half_range = (max_vals - min_vals) / 2.0
+    mid = (max_vals + min_vals) / 2.0
+    # Constant dims (max == min) were normalised to 0 and must decode to the constant.
+    const = np.isclose(max_vals, min_vals)
+    out = values * half_range + K * mid
+    if const.any():
+        out[..., const] = np.broadcast_to(K[:, const] * min_vals[const], out[..., const].shape)
+    return out.astype(np.asarray(normalized_values).dtype, copy=False)
+
+
+def unnormalize_values_meanstd_blocks(normalized_values, params, block_sizes, exempt_dims=None):
+    """Mean-std inverse for block-summed rows: ``sum(x) = y*std + k*mean``."""
+    mean_vals = np.asarray(params["mean"], dtype=np.float64)
+    std_vals = np.asarray(params["std"], dtype=np.float64)
+    values = np.asarray(normalized_values, dtype=np.float64)
+    T, D = values.shape[-2], values.shape[-1]
+    if len(block_sizes) != T:
+        raise ValueError(f"block_sizes has {len(block_sizes)} rows but values have T={T}")
+    K = _block_k_matrix(block_sizes, D, exempt_dims)
+    out = values * std_vals + K * mean_vals
+    # Zero-std dims are passed through untouched by normalize_values_meanstd,
+    # so their k-sum is already in raw units.
+    zero_std = std_vals == 0
+    if zero_std.any():
+        out[..., zero_std] = values[..., zero_std]
+    return out.astype(np.asarray(normalized_values).dtype, copy=False)
+
+
 def normalize_values_meanstd(values, params):
     """
     Normalize values using mean-std (z-score) normalization.

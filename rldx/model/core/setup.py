@@ -310,6 +310,20 @@ class RLDXPipeline(ModelPipeline):
                 )
             )
 
+            # ATQ: expert decoders absent from the base checkpoint start from the
+            # pretrained main decoder instead of 0.02*randn. Upstream ATQ traced
+            # its early router collapse onto `main` to exactly this asymmetry.
+            if getattr(self.config.model, "use_atq_moe", False) and getattr(
+                self.config.model, "atq_init_experts_from_main", True
+            ):
+                am = model.action_model
+                main_sd = am.action_decoder.state_dict()
+                for name in ("m8_action_decoder", "m4_action_decoder", "n8_action_decoder"):
+                    prefix = f"action_model.{name}."
+                    if any(k.startswith(prefix) for k in missing_keys):
+                        getattr(am, name).load_state_dict(main_sd)
+                        _print(colored(f"[ATQ] {name} initialised from main decoder weights", "cyan"))
+
             model._new_param_names = set(missing_keys)
             modeling_utils.load_state_dict = _orig
 
@@ -351,6 +365,17 @@ class RLDXPipeline(ModelPipeline):
     def _get_embodiment_id_mapping(self) -> dict[str, int]:
         return None
 
+    def _atq_conf_carrier_key(self) -> str | None:
+        """Action key the processor strips as the ATQ conf label (None when unused).
+
+        Explicitly None for non-ATQ runs so a base checkpoint's processor config
+        cannot leak a carrier key into a run that has no label.
+        """
+        cfg = self.model_config
+        if getattr(cfg, "use_atq_moe", False) and getattr(cfg, "atq_label_gated", True):
+            return getattr(cfg, "atq_conf_carrier_key", "ratio_label")
+        return None
+
     def _create_dataset(self, save_cfg_dir: Path):
         """Create appropriate dataset based on task and mode."""
 
@@ -385,6 +410,7 @@ class RLDXPipeline(ModelPipeline):
                 physics_keys=getattr(self.model_config, "physics_keys", None),
                 physics_dims=getattr(self.model_config, "physics_dims", None),
                 allow_missing_physics=getattr(self.model_config, "allow_missing_physics", False),
+                conf_carrier_key=self._atq_conf_carrier_key(),
                 **self.transformers_loading_kwargs,
             )
         else:
@@ -417,6 +443,7 @@ class RLDXPipeline(ModelPipeline):
                 physics_keys=getattr(self.model_config, "physics_keys", None),
                 physics_dims=getattr(self.model_config, "physics_dims", None),
                 allow_missing_physics=getattr(self.model_config, "allow_missing_physics", False),
+                conf_carrier_key=self._atq_conf_carrier_key(),
             )
 
         if get_rank() == 0:
@@ -435,7 +462,75 @@ class RLDXPipeline(ModelPipeline):
             json.dump(stats_dict, f, indent=2)
         _print("Saved dataset statistics for inference")
 
+        # ATQ SO(3) rotation targets need the normaliser bounds, which only
+        # exist once the dataset has pushed its statistics into the processor.
+        if getattr(self.config.model, "use_atq_moe", False):
+            self._configure_atq_rotation_merge()
+
         return train_dataset, eval_dataset
+
+    def _configure_atq_rotation_merge(self):
+        """Build the SO(3) RotationGT spec from the processor's action normaliser.
+
+        Mirrors GR00T-action-quantization's ``configure_rotation_merge``: the
+        rotation key's min/max (q01/q99 under ``use_percentiles``) give the
+        normalised->raw affine map, the OSC controller scale gives raw->radians.
+        The spec is persisted on ``model.config`` so inference rebuilds it.
+        """
+        from rldx.model.modules.action_model.atq import build_rotation_spec
+
+        cfg = self.config.model
+        mode = getattr(cfg, "atq_rotation_merge", "legacy")
+        existing = getattr(cfg, "atq_rotation_merge_spec", None)
+        if mode == "legacy":
+            if isinstance(existing, dict) and existing:
+                raise ValueError(
+                    "Checkpoint carries an SO(3) atq_rotation_merge_spec; resuming with "
+                    "--atq-rotation-merge legacy would silently change the targets."
+                )
+            return
+        if mode != "so3":
+            raise ValueError(f"Unknown atq_rotation_merge={mode!r}")
+
+        tags = {ds.embodiment_tag for ds in self.config.data.datasets}
+        if len(tags) != 1:
+            raise ValueError(f"ATQ so3 expects exactly one embodiment, got {sorted(tags)}")
+        (tag,) = tuple(tags)
+        key = getattr(cfg, "atq_rotation_key", "end_effector_rotation")
+        sap = self.processor.state_action_processor
+        action_cfg = sap.modality_configs[tag]["action"]
+        keys = [k for k in action_cfg.modality_keys if k not in sap.skip_action_keys]
+        if key not in keys:
+            raise ValueError(f"atq_rotation_key={key!r} not in action keys {keys}")
+        if action_cfg.mean_std_embedding_keys and key in action_cfg.mean_std_embedding_keys:
+            raise ValueError("SO(3) currently requires min-max normalisation of the rotation key")
+        cursor = 0
+        for k in keys:
+            if k == key:
+                break
+            cursor += int(sap.norm_params[tag]["action"][k]["dim"].item())
+        params = sap.norm_params[tag]["action"][key]
+        if int(params["dim"].item()) != 3:
+            raise ValueError(f"Expected three axis-angle dims for {key!r}, got {params['dim']}")
+        spec = build_rotation_spec(
+            min_vals=params["min"].tolist(),
+            max_vals=params["max"].tolist(),
+            indices=list(range(cursor, cursor + 3)),
+            controller_scale=getattr(cfg, "atq_rotation_controller_scale", 0.5),
+            action_key=key,
+        )
+        if isinstance(existing, dict) and existing and existing != spec:
+            raise ValueError(
+                "Checkpoint SO(3) spec differs from this dataset/config: "
+                f"ckpt={existing} now={spec}"
+            )
+        self.model.action_model.set_rotation_gt(spec)
+        self.model.config.atq_rotation_merge_spec = spec
+        cfg.atq_rotation_merge_spec = spec
+        _print(colored(f"[ATQ] SO(3) rotation GT spec: {json.dumps(spec)}", "cyan"))
+        if get_rank() == 0:
+            with open(self.save_cfg_dir / "final_model_config.json", "w") as f:
+                f.write(self.model.config.to_filtered_json())
 
     def _create_collator(self):
         data_collator = self.processor.collator

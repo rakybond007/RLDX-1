@@ -414,3 +414,56 @@ class TrainConfig:
     num_shards_per_epoch: int = int(1e5)
     """Number of shards to use for the dataset. reduce this number if vram is limited (sharded mode only)."""
     # ----------------------------------------------------------------------------------------------
+
+    # ATQ label-gated variable-horizon MoE (docs/atq_label_gated_moe.md) ---------------------------
+    use_atq_moe: bool = False
+    """Enable the 4-expert variable-horizon MoE (main/m8/m4/n8) on the MSAT action model."""
+
+    atq_speed: float = 2.0
+    """Compressed-group speed: 2.0, or a hardcoded 16-step plan 2.5 / 1.67 / 3.0."""
+
+    atq_block_plan_full: str = ""
+    """Explicit block plan for the full-span compressed expert, e.g. '2,3,2,3,2,3'."""
+
+    atq_block_plan_half: str = ""
+    """Explicit block plan for the half-span compressed expert, e.g. '2,3,3'."""
+
+    atq_discrete_action_dims: list[int] = field(default_factory=list)
+    """Concatenated-action indices that take the block's LAST value (RoboCasa: 6 11)."""
+
+    atq_action_merge_reduction: str = "sum"
+    """'sum' for delta actions, 'last' for absolute actions."""
+
+    atq_rotation_merge: str = "legacy"
+    """'legacy' (sum axis-angle deltas) or 'so3' (compose rotations on SO(3))."""
+
+    atq_rotation_key: str = "end_effector_rotation"
+    """Action key holding the 3-dim axis-angle delta (so3 only)."""
+
+    atq_rotation_controller_scale: float = 0.5
+    """Radians per raw rotation-action unit; must match the OSC eval controller (so3 only)."""
+
+    atq_router_hidden: int = 256
+    atq_router_temp: float = 0.5
+    atq_target_temp: float = 0.3
+    atq_balance_weight: float = 0.05
+    atq_supervise_weight: float = 0.1
+    atq_router_warmup_steps: int = 5000
+    atq_min_prob: float = 0.05
+
+    atq_label_gated: bool = True
+    """Conf label gates compress-vs-fine at inference; False = original free ATQ routing."""
+
+    atq_conf_carrier_key: str = "ratio_label"
+    """Action modality key carrying the baked [conf, valid] label."""
+
+    atq_conf_threshold: float = 0.5
+    atq_conf_loss_coef: float = 0.1
+    atq_conf_readout_detach: bool = True
+
+    atq_init_experts_from_main: bool = True
+    """Copy the pretrained main decoder into new m8/m4/n8 decoders."""
+
+    atq_inference_temp: float = 0.7
+    atq_inference_stochastic: bool = False
+    # ----------------------------------------------------------------------------------------------

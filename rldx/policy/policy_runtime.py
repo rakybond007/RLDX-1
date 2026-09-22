@@ -33,6 +33,7 @@ import torch
 
 from rldx.data.embodiment_tags import EmbodimentTag
 from rldx.data.types import MessageType, VLAStepData
+from rldx.model.modules.action_model.atq import EXPERT_NAMES as ATQ_EXPERT_NAMES
 
 from .session_registry import SessionRegistry
 from .step_request import StepRequest
@@ -154,8 +155,53 @@ class PolicyRuntime:
         if self._rtc_enabled and active_sids:
             self.registry.save_rtc_batch(active_sids, normalized_action)
 
+        if "atq_picked" in model_pred:
+            return self._decode_atq(model_pred, states)
+
         action = self._decode(normalized_action, states)
         return action, {}
+
+    def _decode_atq(self, model_pred: dict, states: list[dict]) -> tuple[dict[str, np.ndarray], dict]:
+        """ATQ variable-horizon decode.
+
+        Every sample in the batch must have picked the same expert: the
+        returned chunk has one horizon, and compressed rows need the picked
+        expert's block sizes for the k-corrected unnormalisation. Mixed picks
+        in one batch are rejected loudly (serve ATQ with one env per request).
+        """
+        picked = model_pred["atq_picked"].reshape(-1).tolist()
+        if len(set(picked)) != 1:
+            raise NotImplementedError(
+                f"ATQ decode got mixed expert picks in one batch ({picked}); "
+                "run one session per request for variable-horizon serving."
+            )
+        e = int(picked[0])
+        am = self.model.action_model
+        block_sizes = list(am.atq_expert_block_sizes[e])
+        h = len(block_sizes)
+        normalized_action = model_pred["action_pred"].float()[:, :h]
+
+        batched_states = {}
+        for k in self.modality_configs["state"].modality_keys:
+            batched_states[k] = np.stack([s[k] for s in states], axis=0)
+        unnormalized = self.processor.decode_action(
+            normalized_action.cpu().numpy(),
+            self.embodiment_tag,
+            batched_states,
+            block_sizes=block_sizes,
+            sum_exempt_dims=am.atq_sum_exempt_dims,
+        )
+        action = {key: value.astype(np.float32) for key, value in unnormalized.items()}
+        info = {
+            "atq_picked": e,
+            "atq_expert": ATQ_EXPERT_NAMES[e],
+            "atq_horizon": h,
+            "atq_block_sizes": block_sizes,
+            "atq_probs": model_pred["atq_probs"].detach().float().cpu().numpy(),
+        }
+        if "atq_conf" in model_pred:
+            info["atq_conf"] = model_pred["atq_conf"].detach().float().cpu().numpy()
+        return action, info
 
     # ------------------------------------------------------------------
     # Stage 1: prepare inputs

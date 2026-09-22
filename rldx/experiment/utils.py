@@ -59,6 +59,11 @@ MODEL_ARCHITECTURE_KEYS = [
     "action_horizon",
     "select_layer",
     "max_num_embodiments",
+    # ATQ MoE changes the action-model parameter set (3 extra decoders, router,
+    # conf head) and the compressed-target grid; surface a ckpt/CLI mismatch.
+    "use_atq_moe",
+    "atq_speed",
+    "atq_label_gated",
 ]
 
 

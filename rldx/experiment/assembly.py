@@ -225,6 +225,88 @@ def _apply_cli_model_overrides(
     # guidance knob, not a training-time setting. See RLDXConfig comment.
     run_config.model.rtc_jacobian_steps_only = cli.rtc_jacobian_steps_only
 
+    # ATQ label-gated MoE: copy every CLI knob so the saved config.json records
+    # the values the run actually used (a missing copy silently trains with the
+    # RLDXConfig default — the exact bug the upstream ATQ repo hit with
+    # --moe-speed 2.5 running as 2.0).
+    for _atq_key in _ATQ_CLI_KEYS:
+        setattr(run_config.model, _atq_key, getattr(cli, _atq_key))
+    if cli.use_atq_moe:
+        _print(
+            f"[ATQ] use_atq_moe=True speed={cli.atq_speed} label_gated={cli.atq_label_gated} "
+            f"rotation_merge={cli.atq_rotation_merge} discrete_dims={list(cli.atq_discrete_action_dims)}"
+        )
+
+
+_ATQ_CLI_KEYS: tuple[str, ...] = (
+    "use_atq_moe",
+    "atq_speed",
+    "atq_block_plan_full",
+    "atq_block_plan_half",
+    "atq_discrete_action_dims",
+    "atq_action_merge_reduction",
+    "atq_rotation_merge",
+    "atq_rotation_key",
+    "atq_rotation_controller_scale",
+    "atq_router_hidden",
+    "atq_router_temp",
+    "atq_target_temp",
+    "atq_balance_weight",
+    "atq_supervise_weight",
+    "atq_router_warmup_steps",
+    "atq_min_prob",
+    "atq_label_gated",
+    "atq_conf_carrier_key",
+    "atq_conf_threshold",
+    "atq_conf_loss_coef",
+    "atq_conf_readout_detach",
+    "atq_init_experts_from_main",
+    "atq_inference_temp",
+    "atq_inference_stochastic",
+)
+
+
+def _validate_atq(cli: TrainConfig, run_config: Config, used_embodiment_tags: set[str]) -> None:
+    """Fail fast on ATQ configurations that would otherwise train silently wrong."""
+    if not cli.use_atq_moe:
+        return
+    from rldx.model.modules.action_model.atq import resolve_block_plans
+
+    # Block plans must parse against the action horizon.
+    resolve_block_plans(
+        cli.action_horizon, cli.atq_speed, cli.atq_block_plan_full, cli.atq_block_plan_half
+    )
+    if cli.atq_action_merge_reduction not in ("sum", "last"):
+        raise ValueError("--atq-action-merge-reduction must be 'sum' or 'last'")
+    if cli.atq_rotation_merge not in ("legacy", "so3"):
+        raise ValueError("--atq-rotation-merge must be 'legacy' or 'so3'")
+    if cli.atq_rotation_merge == "so3" and cli.atq_action_merge_reduction != "sum":
+        raise ValueError("SO(3) delta targets require --atq-action-merge-reduction sum")
+    if cli.rtc_training_max_delay > 0:
+        raise ValueError("ATQ MoE and training-time RTC cannot be combined")
+    if cli.use_physics:
+        raise ValueError("ATQ MoE does not support the physics stream")
+    if len(used_embodiment_tags) != 1:
+        raise ValueError(
+            "ATQ MoE expects exactly one embodiment per run "
+            f"(got {sorted(used_embodiment_tags)}); the label carrier and rotation "
+            "spec are resolved per embodiment."
+        )
+    (tag,) = tuple(used_embodiment_tags)
+    action_cfg = run_config.data.modality_configs[tag]["action"]
+    if cli.atq_label_gated and cli.atq_conf_carrier_key not in action_cfg.modality_keys:
+        raise ValueError(
+            f"--atq-label-gated needs the conf carrier '{cli.atq_conf_carrier_key}' in the "
+            f"action modality keys of embodiment '{tag}' (got {action_cfg.modality_keys}). "
+            "Use a *_conf modality config (e.g. rldx/configs/data/robocasa_conf_config.py) "
+            "and a dataset baked with run_scripts/data/atq_labels/materialize_conf_dataset.py."
+        )
+    if cli.atq_rotation_merge == "so3" and cli.atq_rotation_key not in action_cfg.modality_keys:
+        raise ValueError(
+            f"--atq-rotation-merge so3 needs --atq-rotation-key in the action keys of '{tag}' "
+            f"(got {cli.atq_rotation_key!r}, keys {action_cfg.modality_keys})"
+        )
+
 
 # Features that can be offloaded from a pretrained checkpoint (model arch
 # stays intact apart from the dropped stream, and strict-false state_dict load
@@ -408,11 +490,13 @@ def assemble_run_config(inputs: AssemblyInputs) -> Config:
         F.apply(ctx)
     ctx.finalize()
 
+    used_tags = {ds["embodiment_tag"] for ds in inputs.datasets}
     _validate_action_horizon_matches_modality(
         inputs.cli.action_horizon,
         run_config.data.modality_configs,
-        used_embodiment_tags={ds["embodiment_tag"] for ds in inputs.datasets},
+        used_embodiment_tags=used_tags,
     )
+    _validate_atq(inputs.cli, run_config, used_tags)
 
     if inputs.loaded_ckpt_model_snapshot is not None:
         compare_model_configs(inputs.loaded_ckpt_model_snapshot, run_config.model)

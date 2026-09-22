@@ -45,7 +45,9 @@ from rldx.data.utils import (
     normalize_values_minmax,
     parse_modality_configs,
     unnormalize_values_meanstd,
+    unnormalize_values_meanstd_blocks,
     unnormalize_values_minmax,
+    unnormalize_values_minmax_blocks,
 )
 
 
@@ -97,6 +99,13 @@ class StateActionProcessor:
         self.norm_params: dict[str, dict[str, dict[str, dict[str, np.ndarray]]]] = {}
         # Format: norm_params[embodiment_tag][modality][joint_group][stat_type]
         # where stat_type in ["min", "max", "mean", "std", "dim"]
+
+        # Action keys that ride through the LeRobot plumbing but are NOT robot
+        # actions (e.g. the ATQ conf label carrier). They are skipped by
+        # apply_action / unapply_action / get_action_dim; the owning processor
+        # strips them before normalisation. Mirrors GR00T leaving the carrier
+        # out of ``action_normalization_modes``.
+        self.skip_action_keys: set[str] = set()
 
         if statistics is not None:
             self.set_statistics(statistics)
@@ -392,6 +401,8 @@ class StateActionProcessor:
         # Step 2: Normalize actions
         normalized_values = {}
         for joint_group in modality_keys:
+            if joint_group in self.skip_action_keys:
+                continue
             if joint_group not in action:
                 raise KeyError(
                     f"Joint group '{joint_group}' not found in action dict for embodiment '{embodiment_tag}'"
@@ -419,6 +430,8 @@ class StateActionProcessor:
         action: dict[str, np.ndarray],
         embodiment_tag: str,
         state: dict[str, np.ndarray] | None = None,
+        block_sizes: list[int] | None = None,
+        sum_exempt_dims: dict[str, list[int]] | None = None,
     ) -> dict[str, np.ndarray]:
         """
         Reverse action processing (denormalization, relative->absolute conversion).
@@ -434,6 +447,11 @@ class StateActionProcessor:
             state: Optional dict mapping joint_group -> raw state values
                 Required if any action group uses ActionRepresentation.RELATIVE
                 Shape per group: (T_state, D) or (B, T_state, D) for batched
+            block_sizes: ATQ compressed experts only — number of source steps
+                summed into each of the T rows. Triggers the unclipped,
+                k-corrected inverse (see rldx.data.utils.unnormalize_values_minmax_blocks).
+            sum_exempt_dims: joint_group -> local dim indices that were NOT summed
+                (last-of-block discrete dims, SO(3)-composed rotation dims).
 
         Returns:
             Dict mapping joint_group -> raw absolute action values
@@ -444,7 +462,12 @@ class StateActionProcessor:
         """
         # Step 1: Unnormalize actions
         unnormalized_values = {}
-        modality_keys = self.modality_configs[embodiment_tag]["action"].modality_keys
+        modality_keys = [
+            k
+            for k in self.modality_configs[embodiment_tag]["action"].modality_keys
+            if k not in self.skip_action_keys
+        ]
+        sum_exempt_dims = sum_exempt_dims or {}
 
         for joint_group in modality_keys:
             if joint_group not in action:
@@ -455,11 +478,22 @@ class StateActionProcessor:
             params = self.norm_params[embodiment_tag]["action"][joint_group]
             group_values = action[joint_group]
 
-            if (
+            use_meanstd = (
                 self.modality_configs[embodiment_tag]["action"].mean_std_embedding_keys is not None
                 and joint_group
                 in self.modality_configs[embodiment_tag]["action"].mean_std_embedding_keys
-            ):
+            )
+            if block_sizes is not None:
+                exempt = sum_exempt_dims.get(joint_group, [])
+                if use_meanstd:
+                    unnormalized = unnormalize_values_meanstd_blocks(
+                        group_values, params, block_sizes, exempt
+                    )
+                else:
+                    unnormalized = unnormalize_values_minmax_blocks(
+                        group_values, params, block_sizes, exempt
+                    )
+            elif use_meanstd:
                 unnormalized = unnormalize_values_meanstd(group_values, params)
             else:
                 unnormalized = unnormalize_values_minmax(group_values, params)
@@ -467,10 +501,13 @@ class StateActionProcessor:
             unnormalized_values[joint_group] = unnormalized
 
         # Step 2: Convert relative actions to absolute (if needed)
+        all_keys = self.modality_configs[embodiment_tag]["action"].modality_keys
         action_configs = self.modality_configs[embodiment_tag]["action"].action_configs
 
         if action_configs is not None:
-            for key, action_config in zip(modality_keys, action_configs):
+            for key, action_config in zip(all_keys, action_configs):
+                if key in self.skip_action_keys:
+                    continue
                 if action_config.rep == ActionRepresentation.RELATIVE and self.use_relative_action:
                     if state is None:
                         raise ValueError(
@@ -686,6 +723,8 @@ class StateActionProcessor:
         """
         total_dim = 0
         for joint_group in self.modality_configs[embodiment_tag]["action"].modality_keys:
+            if joint_group in self.skip_action_keys:
+                continue
             total_dim += self.norm_params[embodiment_tag]["action"][joint_group]["dim"].item()
         return total_dim
 

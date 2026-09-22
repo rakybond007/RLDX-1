@@ -145,10 +145,15 @@ class RLDXPolicy(BasePolicy):
             k: norm_params["state"][k]["dim"].item()
             for k in self.modality_configs["state"].modality_keys
         }
-        expected_action_dims = {
-            k: norm_params["action"][k]["dim"].item()
-            for k in self.modality_configs["action"].modality_keys
-        }
+        # ATQ: the conf label carrier rides in the action modality keys but is
+        # never emitted as an action, and expert chunks have variable length.
+        action_keys = (
+            self.processor.action_keys(self.embodiment_tag)
+            if hasattr(self.processor, "action_keys")
+            else list(self.modality_configs["action"].modality_keys)
+        )
+        expected_action_dims = {k: norm_params["action"][k]["dim"].item() for k in action_keys}
+        self.use_atq_moe = bool(getattr(self.model.config, "use_atq_moe", False))
         self.validator: ObservationValidator = ObservationValidator(
             modality_configs=self.modality_configs,
             require_physics=self.require_physics,
@@ -156,6 +161,8 @@ class RLDXPolicy(BasePolicy):
             use_memory=self.use_memory,
             expected_state_dims=expected_state_dims,
             expected_action_dims=expected_action_dims,
+            action_keys=action_keys,
+            variable_action_horizon=self.use_atq_moe,
         )
 
         # PolicyRuntime — orchestrates the inference pipeline. Dependencies

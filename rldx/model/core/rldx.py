@@ -18,6 +18,7 @@ from rldx.model.modules.embodiment_conditioned_mlp import (
     CategorySpecificMLP,
     MultiEmbodimentActionEncoder,
 )
+from rldx.model.modules.action_model import atq as atq_lib
 from rldx.model.modules.memory import TransformerMemory
 from rldx.utils.dist import rank_zero_print as _print
 import torch
@@ -161,9 +162,360 @@ class RLDXActionModel(nn.Module):
         else:
             self.physics = NoOpPhysicsHead()
 
+        # ATQ label-gated variable-horizon MoE (see rldx/model/modules/action_model/atq.py).
+        self.use_atq_moe = bool(getattr(config, "use_atq_moe", False))
+        self.rotation_gt = None
+        if self.use_atq_moe:
+            self._init_atq(config)
+
         self.set_trainable_parameters(
             config.tune_projector, config.tune_diffusion_model, config.tune_vlln
         )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ATQ label-gated variable-horizon MoE
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _init_atq(self, config: RLDXConfig):
+        """Build the three extra expert decoders, the router and the conf head.
+
+        The MSAT body, state encoder, action encoder and position embedding are
+        shared by every expert; only the horizon the body runs at and the final
+        ``CategorySpecificMLP`` differ. Built in ``__init__`` (not late-attached
+        like upstream ATQ) so the checkpoint loader sees the keys and the
+        missing-key report tells you exactly which heads start fresh.
+        """
+        if self._rtc.enabled_training():
+            raise ValueError("use_atq_moe cannot be combined with training-time RTC")
+        if self.use_physics:
+            raise ValueError("use_atq_moe does not support the physics stream")
+
+        full, half = atq_lib.resolve_block_plans(
+            self.action_horizon,
+            getattr(config, "atq_speed", 2.0),
+            getattr(config, "atq_block_plan_full", ""),
+            getattr(config, "atq_block_plan_half", ""),
+        )
+        self.atq_block_plan_full = full
+        self.atq_block_plan_half = half
+        self.atq_expert_block_sizes = atq_lib.expert_block_sizes(self.action_horizon, full, half)
+        self.atq_expert_horizons = [len(s) for s in self.atq_expert_block_sizes]
+        self.atq_discrete_action_dims = [int(d) for d in getattr(config, "atq_discrete_action_dims", [])]
+        self.atq_action_merge_reduction = str(getattr(config, "atq_action_merge_reduction", "sum"))
+        if self.atq_action_merge_reduction not in ("sum", "last"):
+            raise ValueError("atq_action_merge_reduction must be 'sum' or 'last'")
+        self.atq_label_gated = bool(getattr(config, "atq_label_gated", True))
+
+        def _decoder():
+            return CategorySpecificMLP(
+                num_categories=config.max_num_embodiments,
+                input_dim=self.hidden_size,
+                hidden_dim=self.hidden_size,
+                output_dim=self.action_dim,
+            )
+
+        self.m8_action_decoder = _decoder()
+        self.m4_action_decoder = _decoder()
+        self.n8_action_decoder = _decoder()
+
+        router_in = config.backbone_embedding_dim + self.input_embedding_dim
+        hidden = int(getattr(config, "atq_router_hidden", 256))
+        self.head_router = nn.Sequential(
+            nn.Linear(router_in, hidden), nn.GELU(), nn.Linear(hidden, atq_lib.NUM_EXPERTS)
+        )
+        if self.atq_label_gated:
+            # One scalar regressed onto the label's conf. Linear output, no sigmoid:
+            # the target is the conf VALUE (an ordinal score), not a probability.
+            self.conf_readout = nn.Sequential(
+                nn.Linear(router_in, hidden), nn.GELU(), nn.Linear(hidden, 1)
+            )
+        # Router warmup counter (persisted so resume continues the schedule).
+        self.register_buffer("_atq_forward_step", torch.zeros((), dtype=torch.long), persistent=True)
+
+        # SO(3) merged rotation targets, rebuilt from the persisted spec.
+        spec = getattr(config, "atq_rotation_merge_spec", None)
+        if getattr(config, "atq_rotation_merge", "legacy") == "so3" and spec:
+            self.set_rotation_gt(spec)
+
+        _print(
+            f"[ATQ] experts={list(atq_lib.EXPERT_NAMES)} horizons={self.atq_expert_horizons} "
+            f"plans full={full} half={half} discrete_dims={self.atq_discrete_action_dims} "
+            f"reduction={self.atq_action_merge_reduction} label_gated={self.atq_label_gated}"
+        )
+
+    def set_rotation_gt(self, spec: dict | None):
+        """Install (or clear) the SO(3) merged-rotation target builder."""
+        self.rotation_gt = atq_lib.rotation_gt_from_spec(spec)
+        if self.rotation_gt is not None:
+            if self.atq_action_merge_reduction != "sum":
+                raise ValueError("SO(3) delta targets cannot be used with reduction='last'")
+            if set(self.rotation_gt.indices) & set(self.atq_discrete_action_dims):
+                raise ValueError("Rotation dimensions overlap discrete dimensions")
+            _print(f"[ATQ] SO(3) rotation GT installed: {spec}")
+
+    @property
+    def atq_sum_exempt_dims(self) -> list[int]:
+        """Concatenated-action dims that are NOT block-summed (decode with k=1)."""
+        dims = list(self.atq_discrete_action_dims)
+        if self.rotation_gt is not None:
+            dims += list(self.rotation_gt.indices)
+        return sorted(set(dims))
+
+    def _atq_decoders(self):
+        return [
+            self.action_decoder,
+            self.m8_action_decoder,
+            self.m4_action_decoder,
+            self.n8_action_decoder,
+        ]
+
+    def _atq_router_inputs(self, vl_embeds: torch.Tensor, state_features: torch.Tensor) -> torch.Tensor:
+        """Mean-pooled cog tokens ⊕ mean-pooled state token → one vector per sample.
+
+        Returned in the router's parameter dtype: fp32 during training (fresh
+        action-model params), bf16 when the whole model was loaded in bf16 for
+        inference. Logits are promoted to fp32 by the callers before softmax.
+        """
+        pooled = torch.cat([vl_embeds.mean(dim=1), state_features.mean(dim=1)], dim=-1)
+        return pooled.to(self.head_router[0].weight.dtype)
+
+    def _atq_per_sample_loss(
+        self,
+        vl_embeds,
+        encoder_attention_mask,
+        state_features,
+        embodiment_id,
+        clean_actions,
+        action_mask,
+        decoder,
+    ) -> torch.Tensor:
+        """One flow-matching pass at ``clean_actions``' horizon; returns per-sample loss ``(B,)``."""
+        B, h, _ = clean_actions.shape
+        device = clean_actions.device
+        noise = torch.randn_like(clean_actions)
+        t_raw = self.sample_time(B, device=device, dtype=clean_actions.dtype)
+        t = t_raw[:, None, None]
+        noisy_trajectory = (1 - t) * noise + t * clean_actions
+        velocity = clean_actions - noise
+        t_tok = t_raw.unsqueeze(1).expand(-1, h).contiguous()
+
+        action_features = self.action_encoder(noisy_trajectory, t_tok, embodiment_id)
+        if self.config.add_pos_embed:
+            pos_ids = torch.arange(h, dtype=torch.long, device=device)
+            action_features = action_features + self.position_embedding(pos_ids).unsqueeze(0)
+        sa_embs = torch.cat((state_features, action_features), dim=1)
+
+        model_output, _ = self.model(
+            hidden_states=sa_embs,
+            encoder_hidden_states=vl_embeds,
+            timestep=t_raw,
+            return_all_hidden_states=True,
+            encoder_attention_mask=encoder_attention_mask,
+            physics_embs=None,
+            physics_attention_mask=None,
+        )
+        pred = decoder(model_output, embodiment_id)[:, -h:]
+        mask = action_mask.to(pred.dtype)
+        per_dim = F.mse_loss(pred, velocity, reduction="none") * mask
+        denom = mask.reshape(B, -1).sum(-1).clamp(min=1.0)
+        return per_dim.reshape(B, -1).sum(-1) / denom
+
+    def _atq_forward(
+        self,
+        vl_embeds,
+        encoder_attention_mask,
+        state_features,
+        embodiment_id,
+        actions,
+        action_mask,
+        conf_target,
+        conf_valid,
+    ) -> dict:
+        """Soft-mixture MoE training step (per-expert body forward at its own horizon).
+
+        total = Σ_i p_i·loss_i + coef·conf_loss
+              + warmup·λ_bal·balance + warmup·λ_sup·KL(router ‖ softmax(−loss/τ))
+
+        No group gate during training: every expert is supervised on its own
+        target every step (``atq_min_prob`` keeps gradient flowing to all of
+        them), so the label is needed for exactly one thing — the conf
+        regression. The compress/fine decision happens at inference.
+        """
+        cfg = self.config
+        B = actions.shape[0]
+        targets = atq_lib.expert_targets(
+            actions,
+            action_mask,
+            self.action_horizon,
+            self.atq_block_plan_full,
+            self.atq_block_plan_half,
+            self.atq_discrete_action_dims,
+            self.atq_action_merge_reduction,
+            self.rotation_gt,
+        )
+        per_sample = [
+            self._atq_per_sample_loss(
+                vl_embeds, encoder_attention_mask, state_features, embodiment_id, clean, mask, dec
+            )
+            for (clean, mask), dec in zip(targets, self._atq_decoders())
+        ]
+        losses = torch.stack(per_sample, dim=-1).float()  # (B, 4)
+
+        router_in = self._atq_router_inputs(vl_embeds, state_features)
+        router_temp = max(float(getattr(cfg, "atq_router_temp", 0.5)), 1e-3)
+        log_router = F.log_softmax(self.head_router(router_in).float() / router_temp, dim=-1)
+        router_probs = log_router.exp()
+        min_prob = float(getattr(cfg, "atq_min_prob", 0.05))
+        if min_prob > 0:
+            router_probs = torch.clamp(router_probs, min=min_prob)
+            router_probs = router_probs / router_probs.sum(dim=-1, keepdim=True)
+
+        soft_mixture = (router_probs * losses).sum(-1).mean()
+        mean_p = router_probs.mean(dim=0)
+        balance = ((mean_p - 1.0 / atq_lib.NUM_EXPERTS) ** 2).sum()
+        target_temp = max(float(getattr(cfg, "atq_target_temp", 0.3)), 1e-3)
+        target_dist = F.softmax(-losses.detach() / target_temp, dim=-1)
+        kl_supervise = F.kl_div(log_router, target_dist, reduction="batchmean")
+
+        warmup_steps = int(getattr(cfg, "atq_router_warmup_steps", 5000))
+        warmup = min(1.0, float(self._atq_forward_step.item()) / warmup_steps) if warmup_steps > 0 else 1.0
+
+        total = (
+            soft_mixture
+            + (warmup * float(getattr(cfg, "atq_balance_weight", 0.05))) * balance
+            + (warmup * float(getattr(cfg, "atq_supervise_weight", 0.1))) * kl_supervise
+        )
+
+        out = {
+            "loss_soft_mixture": soft_mixture.detach(),
+            "loss_balance": balance.detach(),
+            "loss_kl_supervise": kl_supervise.detach(),
+            "atq_warmup": torch.tensor(warmup, device=actions.device),
+        }
+
+        if self.atq_label_gated:
+            if conf_target is None:
+                raise ValueError(
+                    "atq_label_gated=True needs conf_target in the batch. Is the conf carrier "
+                    "in the action modality keys and baked into the dataset?"
+                )
+            conf_in = router_in.detach() if getattr(cfg, "atq_conf_readout_detach", True) else router_in
+            conf_pred = self.conf_readout(conf_in).float().reshape(-1)
+            tgt = conf_target.reshape(-1).float()
+            v = conf_valid.reshape(-1).float() if conf_valid is not None else torch.ones_like(conf_pred)
+            denom = v.sum().clamp(min=1.0)
+            conf_loss = (((conf_pred - tgt) ** 2) * v).sum() / denom
+            total = total + float(getattr(cfg, "atq_conf_loss_coef", 0.1)) * conf_loss
+            out["loss_conf"] = conf_loss.detach()
+            out["loss_diag_conf_mae"] = (((conf_pred - tgt).abs() * v).sum() / denom).detach()
+            out["loss_diag_conf_mean"] = ((conf_pred.detach() * v).sum() / denom)
+            out["loss_diag_conf_target_mean"] = (tgt * v).sum() / denom
+            out["loss_diag_gate_valid_frac"] = v.mean()
+
+        for i, name in enumerate(atq_lib.EXPERT_NAMES):
+            out[f"loss_{name}"] = losses[:, i].mean().detach()
+            out[f"loss_diag_router_p_{name}"] = mean_p[i].detach()
+        with torch.no_grad():
+            pc = router_probs[:, list(atq_lib.COMP_EXPERTS)]
+            pf = router_probs[:, list(atq_lib.FINE_EXPERTS)]
+            out["loss_diag_router_comp_split"] = (pc[:, 0] / pc.sum(-1).clamp(min=1e-8)).mean()
+            out["loss_diag_router_fine_split"] = (pf[:, 0] / pf.sum(-1).clamp(min=1e-8)).mean()
+            floor = min_prob * 0.999 if min_prob > 0 else -1.0
+            out["loss_diag_router_comp_flat_frac"] = (pc <= floor).all(-1).float().mean()
+
+        if self.training:
+            with torch.no_grad():
+                self._atq_forward_step += 1
+
+        out["loss"] = total
+        out["backbone_features"] = vl_embeds
+        out["state_features"] = state_features
+        return out
+
+    def _atq_denoise(self, vl_embeds, encoder_attention_mask, state_features, embodiment_id, decoder, horizon):
+        """Euler flow-matching loop at ``horizon`` rows using ``decoder``."""
+        B = vl_embeds.shape[0]
+        device, dtype = vl_embeds.device, vl_embeds.dtype
+        actions = torch.randn((B, horizon, self.action_dim), dtype=dtype, device=device)
+        if hasattr(self, "denoising_timesteps") and self.denoising_timesteps is not None:
+            timesteps_list = list(self.denoising_timesteps) + [1.0]
+        else:
+            n = self.num_inference_timesteps
+            timesteps_list = [t / float(n) for t in range(n)] + [1.0]
+        for i in range(len(timesteps_list) - 1):
+            t_cont = float(timesteps_list[i])
+            dt = float(timesteps_list[i + 1] - timesteps_list[i])
+            t_scalar = torch.full((B,), t_cont, device=device, dtype=dtype)
+            t_tok = t_scalar.unsqueeze(1).expand(-1, horizon).contiguous()
+            af = self.action_encoder(actions, t_tok, embodiment_id)
+            if self.config.add_pos_embed:
+                pos_ids = torch.arange(horizon, dtype=torch.long, device=device)
+                af = af + self.position_embedding(pos_ids).unsqueeze(0)
+            sa = torch.cat((state_features, af), dim=1)
+            mo = self.model(
+                hidden_states=sa,
+                encoder_hidden_states=vl_embeds,
+                timestep=t_scalar,
+                encoder_attention_mask=encoder_attention_mask,
+            )
+            ao = mo["action"] if isinstance(mo, dict) else mo
+            v = decoder(ao, embodiment_id)[:, -horizon:]
+            actions = actions + dt * v
+        return actions
+
+    @torch.no_grad()
+    def _atq_get_action(self, vl_embeds, state_features, embodiment_id, backbone_output) -> BatchFeature:
+        """Route each sample to one expert and denoise at that expert's horizon.
+
+        With ``atq_label_gated`` the conf head stands in for the label: samples
+        with ``conf_pred >= atq_conf_threshold`` are restricted to the
+        compressed group {m8, m4}, the rest to {main, n8}; the router then ranks
+        horizons inside the group. ``action_pred`` is zero-padded to
+        ``action_horizon`` rows; ``atq_horizon`` says how many rows are real.
+        """
+        cfg = self.config
+        B = vl_embeds.shape[0]
+        encoder_attention_mask = backbone_output.get("backbone_attention_mask", None)
+        if encoder_attention_mask is not None and encoder_attention_mask.all():
+            encoder_attention_mask = None
+
+        router_in = self._atq_router_inputs(vl_embeds, state_features)
+        inf_temp = max(float(getattr(cfg, "atq_inference_temp", 0.7)), 1e-3)
+        probs = F.softmax(self.head_router(router_in).float() / inf_temp, dim=-1)
+        conf_pred = None
+        if self.atq_label_gated:
+            conf_pred = self.conf_readout(router_in).float().reshape(-1)
+            tau = float(getattr(cfg, "atq_conf_threshold", 0.5))
+            probs = atq_lib.apply_group_mask(probs, conf_pred >= tau)
+        if getattr(cfg, "atq_inference_stochastic", False):
+            pick = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        else:
+            pick = probs.argmax(dim=-1)
+
+        decoders = self._atq_decoders()
+        out = torch.zeros((B, self.action_horizon, self.action_dim), dtype=vl_embeds.dtype, device=vl_embeds.device)
+        horizons = torch.zeros((B,), dtype=torch.long, device=vl_embeds.device)
+        for e in torch.unique(pick).tolist():
+            idx = (pick == e).nonzero(as_tuple=True)[0]
+            h = self.atq_expert_horizons[e]
+            sub_mask = encoder_attention_mask[idx] if encoder_attention_mask is not None else None
+            acts = self._atq_denoise(
+                vl_embeds[idx], sub_mask, state_features[idx], embodiment_id[idx], decoders[e], h
+            )
+            out[idx, :h] = acts
+            horizons[idx] = h
+
+        data = {
+            "action_pred": out,
+            "atq_picked": pick,
+            "atq_probs": probs,
+            "atq_horizon": horizons,
+            "backbone_features": vl_embeds,
+            "state_features": state_features,
+        }
+        if conf_pred is not None:
+            data["atq_conf"] = conf_pred
+        return BatchFeature(data=data)
 
     def set_trainable_parameters(
         self, tune_projector: bool, tune_diffusion_model: bool, tune_vlln: bool
@@ -187,6 +539,12 @@ class RLDXActionModel(nn.Module):
             self.action_encoder.requires_grad_(False)
             self.action_decoder.requires_grad_(False)
             self.physics.requires_grad_(False)
+            if self.use_atq_moe:
+                # Expert decoders follow the main decoder; the router and conf
+                # head are new parameters and stay trainable regardless.
+                self.m8_action_decoder.requires_grad_(False)
+                self.m4_action_decoder.requires_grad_(False)
+                self.n8_action_decoder.requires_grad_(False)
             if self.config.add_pos_embed:
                 self.position_embedding.requires_grad_(False)
             if self.state_dropout_prob > 0:
@@ -363,6 +721,22 @@ class RLDXActionModel(nn.Module):
 
         # Embed noised action trajectory.
         actions = action_input.action
+
+        if self.use_atq_moe:
+            enc_mask = backbone_output.get("backbone_attention_mask", None)
+            if enc_mask is not None and enc_mask.all():
+                enc_mask = None
+            return self._atq_forward(
+                vl_embeds,
+                enc_mask,
+                state_features,
+                embodiment_id,
+                actions,
+                action_input.action_mask,
+                action_input.get("conf_target", None),
+                action_input.get("conf_valid", None),
+            )
+
         batch_size = actions.shape[0]
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
         t_raw = self.sample_time(batch_size, device=actions.device, dtype=actions.dtype)  # (B,)
@@ -513,6 +887,9 @@ class RLDXActionModel(nn.Module):
                 Missing prefix at episode start falls back to standard sampling.
         """
         vl_embeds = backbone_features
+
+        if self.use_atq_moe:
+            return self._atq_get_action(vl_embeds, state_features, embodiment_id, backbone_output)
 
         # Set initial actions as the sampled noise.
         batch_size = vl_embeds.shape[0]
