@@ -370,6 +370,9 @@ class LeRobotEpisodeLoader:
             for joint_group in joint_groups_df.columns:
                 loaded_df[f"{modality_type}.{joint_group}"] = joint_groups_df[joint_group]
 
+        for column in getattr(self, "extra_parquet_columns", ()):
+            loaded_df[column] = original_df[column]
+
         return loaded_df
 
     def _load_video_data(self, episode_index: int, indices: np.ndarray) -> dict[str, np.ndarray]:

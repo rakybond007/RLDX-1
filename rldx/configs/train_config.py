@@ -401,7 +401,7 @@ class TrainConfig:
     """Proportion of total training steps used for learning rate warm-up."""
 
     dataset_mode: str = "sharded"
-    """Dataset loading mode: 'sharded' (default) or 'standard'.
+    """Dataset loading mode: 'sharded' (default), 'standard', or 'demospeedup_sharded'.
     'sharded': pre-shards episodes for background prefetch (episode_sampling_rate applies).
     'standard': map-style random-access dataset; all valid steps are included, no sharding."""
 

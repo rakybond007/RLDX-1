@@ -175,6 +175,7 @@ class ShardedSingleStepDataset(ShardedDataset):
         episode_sampling_rate: float = 0.1,
         seed: int = 42,
         allow_padding: bool = False,
+        episode_loader_class: type[LeRobotEpisodeLoader] = LeRobotEpisodeLoader,
     ):
         """Initialize single-step dataset with sharding configuration."""
         super().__init__(dataset_path)
@@ -191,7 +192,7 @@ class ShardedSingleStepDataset(ShardedDataset):
         action_delta_indices = modality_configs["action"].delta_indices
         self.action_horizon = max(action_delta_indices) - min(action_delta_indices) + 1
 
-        self.episode_loader = LeRobotEpisodeLoader(
+        self.episode_loader = episode_loader_class(
             dataset_path=dataset_path,
             modality_configs=modality_configs,
             video_backend=video_backend,

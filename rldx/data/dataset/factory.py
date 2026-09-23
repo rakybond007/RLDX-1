@@ -23,6 +23,7 @@ from tqdm import tqdm
 from rldx.configs.base_config import Config
 from rldx.data.dataset.sharded_mixture_dataset import ShardedMixtureDataset
 from rldx.data.dataset.sharded_single_step_dataset import ShardedSingleStepDataset
+from rldx.data.dataset.demospeedup_sharded_dataset import DemoSpeedupShardedSingleStepDataset
 from rldx.data.dataset.standard_mixture_dataset import StandardMixtureDataset
 from rldx.data.dataset.standard_single_step_dataset import StandardSingleStepDataset
 from rldx.data.embodiment_tags import EmbodimentTag
@@ -70,8 +71,8 @@ class DatasetFactory:
         )
 
         dataset_mode = getattr(self.config.data, "dataset_mode", "sharded")
-        assert dataset_mode in ("sharded", "standard"), (
-            f"Unknown dataset_mode '{dataset_mode}'. Choose 'sharded' or 'standard'."
+        assert dataset_mode in ("sharded", "standard", "demospeedup_sharded"), (
+            f"Unknown dataset_mode '{dataset_mode}'."
         )
 
         all_datasets = []
@@ -87,10 +88,23 @@ class DatasetFactory:
                 assert embodiment_tag is not None, "Embodiment tag is required"
                 assert self.config.data.mode == "single_turn", "Only single turn mode is supported"
 
-                self._ensure_stats(dataset_path, embodiment_tag)
+                if dataset_mode == "demospeedup_sharded":
+                    from pathlib import Path
 
-                if dataset_mode == "sharded":
-                    dataset = ShardedSingleStepDataset(
+                    meta = Path(dataset_path) / "meta"
+                    for name in ("stats.json", "speedup_action_stats.json"):
+                        if not (meta / name).is_file():
+                            raise FileNotFoundError(meta / name)
+                else:
+                    self._ensure_stats(dataset_path, embodiment_tag)
+
+                if dataset_mode in ("sharded", "demospeedup_sharded"):
+                    dataset_class = (
+                        DemoSpeedupShardedSingleStepDataset
+                        if dataset_mode == "demospeedup_sharded"
+                        else ShardedSingleStepDataset
+                    )
+                    dataset = dataset_class(
                         dataset_path=dataset_path,
                         embodiment_tag=EmbodimentTag(embodiment_tag),
                         modality_configs=self.config.data.modality_configs[embodiment_tag],
@@ -118,7 +132,7 @@ class DatasetFactory:
                 all_datasets.append(dataset)
                 all_weights.append(weight)
 
-        if dataset_mode == "sharded":
+        if dataset_mode in ("sharded", "demospeedup_sharded"):
             train_dataset = ShardedMixtureDataset(
                 datasets=all_datasets,
                 weights=all_weights,
@@ -126,7 +140,10 @@ class DatasetFactory:
                 seed=self.config.data.seed,
                 training=True,
                 num_shards_per_epoch=self.config.data.num_shards_per_epoch,
-                override_pretraining_statistics=self.config.data.override_pretraining_statistics,
+                override_pretraining_statistics=(
+                    dataset_mode == "demospeedup_sharded"
+                    or self.config.data.override_pretraining_statistics
+                ),
             )
         else:
             train_dataset = StandardMixtureDataset(
