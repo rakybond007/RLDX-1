@@ -266,12 +266,21 @@ class MultiStepWrapper(gym.Wrapper):
 
     def step(self, action):
         """
-        action: dict: key-value pairs where the values are of shape (n_action_steps,) + action_shape
+        action: dict: key-value pairs where the values are of shape (n_rows,) + action_shape
+
+        ``n_rows`` is normally ``n_action_steps``, but an ATQ policy returns one
+        row per step of the expert the router picked, which is shorter than the
+        action horizon for the compressed experts (e.g. 8 rows at 2.0x, 5 at
+        1.67x). Executing ``n_action_steps`` rows unconditionally indexed past
+        the end of that chunk. Execute what the policy actually returned, capped
+        by ``n_action_steps`` so the fixed-horizon path is unchanged.
         """
         states = []
         rewards = []
         dones = []
-        for step in range(self.n_action_steps):
+        n_rows = min(len(value) for value in action.values())
+        n_steps = min(self.n_action_steps, n_rows)
+        for step in range(n_steps):
             act = {}
             for key, value in action.items():
                 act[key] = value[step, :]

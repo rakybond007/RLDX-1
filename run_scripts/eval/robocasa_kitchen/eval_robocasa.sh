@@ -4,9 +4,12 @@
 set -u
 export NO_ALBUMENTATIONS_UPDATE=1
 
-CKPT_NAME=${1:?"Usage: $0 <CKPT_NAME>"}
+CKPT_NAME=${1:?"Usage: $0 <CKPT_NAME> [MODEL_PATH]"}
 BASE_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
-MODEL_PATH="$CKPT_NAME"
+# Second argument separates the run label (used for the output tree) from the
+# checkpoint path, matching eval_libero.sh. Defaults to the old behaviour where
+# the single argument is both.
+MODEL_PATH="${2:-$CKPT_NAME}"
 
 OUT_ROOT="$BASE_DIR/output_final/robocasa/$CKPT_NAME"
 LOG_ROOT="$BASE_DIR/output_final/robocasa/$CKPT_NAME/_launcher_logs"
@@ -60,13 +63,13 @@ run_shard() {
     echo "[shard ${gpu_id}] running ${task_name}" >> "$shard_log"
     "$BASE_DIR/rldx/eval/sim/robocasa/robocasa_uv/.venv/bin/python" \
       "$BASE_DIR/rldx/eval/rollout_policy.py" \
-        --n_episodes 50 \
+        --n_episodes ${N_EPISODES:-50} \
         --policy_client_host 127.0.0.1 \
         --policy_client_port "$port" \
-        --max_episode_steps 720 \
+        --max_episode_steps ${MAX_EPISODE_STEPS:-1500} \
         --env_name "robocasa_panda_omron/${task_name}_PandaOmron_Env" \
-        --n_action_steps 16 \
-        --n_envs 1 \
+        --n_action_steps ${N_ACTION_STEPS:-16} \
+        --n_envs ${N_ENVS:-1} \
         --video_dir "$out_dir" \
         >> "$out_dir/eval.log" 2>&1
     echo "[shard ${gpu_id}] ${task_name} done (exit=$?)" >> "$shard_log"

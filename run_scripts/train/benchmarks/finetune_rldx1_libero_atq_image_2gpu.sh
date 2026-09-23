@@ -76,6 +76,14 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS=1
 export WANDB_MODE="${WANDB_MODE:-disabled}"
+# NCCL 2.26.2 lacks the host-cuMem allocation fallback added in 2.26.5.
+# Apply NVIDIA's documented /dev/shm fallback only on the H100 partition
+# (without it every 2-GPU job on an H100 node dies at the first NCCL barrier
+# with "CUDA error: out of memory"). Mirrors hojin2's baseline runtime script.
+if [[ "${SLURM_JOB_PARTITION:-}" == h100 ]]; then
+    export NCCL_CUMEM_HOST_ENABLE=0
+    echo 'H100 NCCL: host cuMem disabled; using /dev/shm allocation'
+fi
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$BASE_DIR/.cache/uv}"
 export HF_HOME="${HF_HOME:-$BASE_DIR/.cache/huggingface}"
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$BASE_DIR/.cache/triton}"
