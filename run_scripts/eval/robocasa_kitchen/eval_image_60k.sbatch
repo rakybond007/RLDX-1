@@ -2,9 +2,9 @@
 #SBATCH --job-name=eval_rldx1_robocasa_image_gb64_checkpoint60000_kitchen_24tasks
 #SBATCH --nodes=1
 #SBATCH --gpus=1
-#SBATCH --partition=sjw_alinlab_premium
+#SBATCH --partition=background
 #SBATCH --wckey=project-short-name:sub_fast
-#SBATCH --array=0-3%2
+#SBATCH --array=0-7
 #SBATCH --time=2-00:00:00
 #SBATCH --output=out/%A_%a-rldx1_robocasa_image_eval.out
 #SBATCH --error=out/%A_%a-rldx1_robocasa_image_eval.err
@@ -53,8 +53,10 @@ if [[ "$ready" != 1 ]] || ! kill -0 "$SERVER_PID" 2>/dev/null; then
     exit 1
 fi
 
-for offset in 0 1 2 3 4 5; do
-    index=$((SHARD * 6 + offset))
+CLIENT_PIDS=()
+CLIENT_TASKS=()
+for offset in 0 8 16; do
+    index=$((SHARD + offset))
     task="${TASKS[$index]}"
     target="$RESULTS/$task"
     mkdir -p "$target"
@@ -65,11 +67,22 @@ for offset in 0 1 2 3 4 5; do
         --max_episode_steps 720 \
         --env_name "robocasa_panda_omron/${task}_PandaOmron_Env" \
         --n_action_steps 16 --n_envs 1 --seed 42 --video_dir "$target" \
-        > "$target/eval.log" 2>&1
+        > "$target/eval.log" 2>&1 &
+    CLIENT_PIDS+=("$!")
+    CLIENT_TASKS+=("$task")
+done
+status=0
+for i in 0 1 2; do
+    task="${CLIENT_TASKS[$i]}"
+    target="$RESULTS/$task"
+    wait "${CLIENT_PIDS[$i]}" || status=1
     test "$(tail -n 1 "$target/eval.log" | cut -c 1-13)" = 'success rate:' || {
         echo "No success-rate line for $task" >&2
-        exit 1
+        status=1
     }
-    echo "ROBOCASA_TASK_COMPLETE shard=$SHARD task=$task"
+    if [[ "$status" == 0 ]]; then
+        echo "ROBOCASA_TASK_COMPLETE shard=$SHARD task=$task"
+    fi
 done
+if [[ "$status" != 0 ]]; then exit 1; fi
 echo "ROBOCASA_SHARD_COMPLETE shard=$SHARD"

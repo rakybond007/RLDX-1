@@ -47,8 +47,9 @@ The image checkpoint at
 [`prehj/rldx1-robocasa-img-gb64-60k-baseline`](https://huggingface.co/prehj/rldx1-robocasa-img-gb64-60k-baseline)
 is evaluated with the same 24 tasks and 50 episodes/task as the kitchen runner
 above. The existing kitchen protocol uses 720 maximum environment steps,
-16 actions per policy call, and seed 42. Four array shards each run six tasks
-with one model server per GPU, at most two GPUs concurrently. The checkpoint is
+16 actions per policy call, and seed 42. Eight array shards each run three
+tasks (indices `i`, `i+8`, `i+16`) concurrently against one model server per GPU
+in the `background` partition, matching the GR00T evaluation runner. The checkpoint is
 downloaded to `models/rldx1-robocasa-img-gb64-60k-baseline`.
 
 The simulator uses `.venv-robocasa-eval` with Python from the existing
