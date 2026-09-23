@@ -72,6 +72,16 @@ class ServerConfig:
     strict: bool = True
     """Whether to enforce strict input and output validation"""
 
+    transport: Literal["zmq", "websocket"] = "zmq"
+    """Wire protocol the server speaks.
+
+    ``zmq`` is RLDX's own ZeroMQ + msgpack ``PolicyServer``. ``websocket`` is
+    the openpi-compatible server, for clients whose environment carries
+    ``websockets`` + ``openpi_client`` but not ``pyzmq`` (the LIBERO eval
+    environment is one). Both accept the same request shape, so the same
+    client adapter drives either.
+    """
+
     use_sim_policy_wrapper: bool = False
     """Whether to use the sim policy wrapper"""
 
@@ -100,6 +110,20 @@ class ServerConfig:
 
     rtc_jacobian_steps_only: int | None = None
     """If set, guide only the first N denoising steps (memory-saving)."""
+
+    # ── SAIL Error-Adaptive Guidance ───────────────────────────────────────
+    eag_cfg_weight: float | None = None
+    """Override the checkpoint's ``eag_cfg_weight`` at load time.
+
+    The combination is ``uncond + (1 + w)(cond - uncond)``, so the code weight
+    and the SAIL paper's weight differ by one: ``paper w = code w + 1``. Code
+    ``0.0`` is paper ``w`` 1 (the answer is the conditional branch itself) and
+    code ``-1.0`` is paper ``w`` 0 (the answer is the unconditional branch).
+    Negative values are passed through. None keeps the checkpoint's value.
+
+    Only meaningful on a checkpoint trained with EAG; a checkpoint without it
+    is rejected rather than served with the flag silently dropped.
+    """
 
     # ── Inference acceleration ─────────────────────────────────────────────
     compile: Literal["none", "submodule", "fullgraph"] | None = None
@@ -188,6 +212,27 @@ def main(config: ServerConfig):
     else:
         raise ValueError("Either model_path or dataset_path must be provided")
 
+    # EAG: the checkpoint records the weight training used (1.0 by default),
+    # and evaluation moves it. A silently ignored override would serve the
+    # wrong arm under the right job name, so this prints what it changed and
+    # the eval scripts grep the line before launching any client.
+    if config.eag_cfg_weight is not None:
+        action_model = getattr(policy, "model", None)
+        action_model = getattr(action_model, "action_model", None)
+        if not getattr(action_model, "use_future_action_condition", False):
+            raise SystemExit(
+                "--eag-cfg-weight only means something on a checkpoint trained "
+                "with EAG (use_future_action_condition=False on this one)"
+            )
+        prev = action_model.eag_cfg_weight
+        action_model.eag_cfg_weight = float(config.eag_cfg_weight)
+        policy.model.config.eag_cfg_weight = float(config.eag_cfg_weight)
+        print(
+            f"  [eag] cfg weight {prev} -> {config.eag_cfg_weight} "
+            f"(combination = uncond + (1+w)(cond - uncond), paper w = code w + 1)",
+            flush=True,
+        )
+
     # Apply inference optimization if requested. ReplayPolicy has no
     # ``model.get_action`` attribute to wrap, so optimization only fires for
     # the RLDXPolicy branch.
@@ -202,6 +247,22 @@ def main(config: ServerConfig):
         from rldx.policy.rldx_policy import RLDXSimPolicyWrapper
 
         policy = RLDXSimPolicyWrapper(policy, strict=config.strict)
+
+    if config.transport == "websocket":
+        from rldx.eval.serving import websocket_policy_server
+
+        server = websocket_policy_server.WebsocketPolicyServer(
+            policy=policy,
+            host="0.0.0.0" if config.host in ("127.0.0.1", "*") else config.host,
+            port=config.port,
+            metadata=None,
+        )
+        print(f"Server is ready and listening on ws://{config.host}:{config.port}", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\nShutting down server...")
+        return
 
     server = PolicyServer(
         policy=policy,

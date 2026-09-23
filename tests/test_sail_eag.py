@@ -380,6 +380,95 @@ def test_scripts_pass_all_four_flags():
         )
 
 
+# ── 5. serving the guide (eval path) ────────────────────────────────────────
+
+
+def test_options_carry_the_guide_to_the_step_request():
+    from rldx.policy.step_request import decode_options_to_step_request
+
+    obs = {"video": {"front_view": torch.zeros(1, 1, 4, 4, 3).numpy()}}
+    guide = torch.zeros(4, 8).numpy()
+    req = decode_options_to_step_request(obs, {"eag_guide": guide})
+    assert req.eag_guide is not None, "eag_guide must not fall into extras"
+    assert "eag_guide" not in req.extras
+
+
+def test_a_guide_with_the_wrong_batch_is_rejected_before_inference():
+    from rldx.policy.step_request import decode_options_to_step_request
+
+    obs = {"video": {"front_view": torch.zeros(1, 1, 4, 4, 3).numpy()}}
+    try:
+        decode_options_to_step_request(obs, {"eag_guide": torch.zeros(3, 4, 8).numpy()})
+    except ValueError as exc:
+        assert "batch dim" in str(exc), exc
+    else:
+        raise AssertionError("a (3,h,D) guide against B=1 must raise")
+
+
+def test_runtime_injects_the_guide_normalized_and_padded():
+    """The client speaks physical units; the model consumes normalized, padded ones."""
+    import numpy as np
+
+    from rldx.policy.policy_runtime import PolicyRuntime
+    from rldx.policy.step_request import StepRequest
+
+    class _Sap:
+        modality_configs = {"tag": {"action": type("C", (), {"modality_keys": ["a", "b"]})()}}
+        norm_params = {"tag": {"action": {"a": {"min": np.zeros(3)}, "b": {"min": np.zeros(1)}}}}
+
+        def apply_action(self, action_dict, embodiment_tag, state):
+            # stand-in normalizer: halve everything, so "was it applied" is visible
+            return {k: v * 0.5 for k, v in action_dict.items()}
+
+    class _Processor:
+        state_action_processor = _Sap()
+
+    rt = PolicyRuntime.__new__(PolicyRuntime)
+    rt.processor = _Processor()
+    rt.embodiment_tag = type("T", (), {"value": "tag"})()
+    rt.verbose = False
+    rt.model = type("M", (), {})()
+    rt.model.device = torch.device("cpu")
+    rt.model.action_model = _Stub(action_dim=6, horizon=4)
+
+    guide = np.ones((1, 4, 4), dtype=np.float32)  # (B, h, real_dim=4)
+    rt._inject_eag_guide(StepRequest(obs={}, batch_size=1, eag_guide=guide), collated := {}, 1)
+    out = collated["eag_guide_actions"].float()
+    assert out.shape == (1, 4, 6), f"guide must be padded to action_dim: {out.shape}"
+    assert torch.allclose(out[:, :, :4], torch.full((1, 4, 4), 0.5)), out
+    assert torch.allclose(out[:, :, 4:], torch.zeros(1, 4, 2)), "padding must be zero"
+
+
+def test_a_guide_sent_to_a_non_eag_checkpoint_is_an_error():
+    import numpy as np
+
+    from rldx.policy.policy_runtime import PolicyRuntime
+    from rldx.policy.step_request import StepRequest
+
+    rt = PolicyRuntime.__new__(PolicyRuntime)
+    rt.model = type("M", (), {})()
+    rt.model.action_model = _Stub(enabled=False)
+    try:
+        rt._inject_eag_guide(
+            StepRequest(obs={}, batch_size=1, eag_guide=np.ones((1, 4, 8), dtype=np.float32)),
+            {}, 1,
+        )
+    except ValueError as exc:
+        assert "trained without" in str(exc), exc
+    else:
+        raise AssertionError("a guide against a non-EAG checkpoint must raise")
+
+
+def test_server_exposes_the_cfg_weight_override_and_says_what_it_changed():
+    src = (ROOT / "rldx/eval/run_rldx_server.py").read_text()
+    assert "eag_cfg_weight: float | None = None" in src
+    assert "[eag] cfg weight" in src, (
+        "the override must print what it changed — eval scripts grep this line "
+        "before they launch a client"
+    )
+    assert 'transport: Literal["zmq", "websocket"]' in src
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

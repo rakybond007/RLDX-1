@@ -12,6 +12,10 @@ Options keys consumed (closed set, verified from grep of `rldx_policy.py`):
   - "session_ids"     — list[str], per-sample session identifiers
   - "action_prefix"   — ndarray or Tensor, (B,d,D) or (d,D) for broadcast
   - "rtc_prefix_len"  — int, effective prefix length override
+  - "eag_guide"       — ndarray or Tensor, (B,h,D) or (h,D) for broadcast.
+                        SAIL Error-Adaptive Guidance guide actions in
+                        PHYSICAL units; the runtime normalizes them the same
+                        way it normalizes a client-supplied action_prefix.
 
 Any other field in options is ignored (e.g. third-party extensions).
 """
@@ -77,6 +81,7 @@ class StepRequest:
     reset_mask: list[bool] | None = None
     action_prefix: "np.ndarray | torch.Tensor | None" = None
     rtc_prefix_len: int | None = None
+    eag_guide: "np.ndarray | torch.Tensor | None" = None
 
     # Extras that were in options but not consumed — kept for caller
     # debugging, never acted on.
@@ -124,6 +129,22 @@ class StepRequest:
             if len(shape) == 3 and shape[0] != B:
                 raise ValueError(f"action_prefix batch dim {shape[0]} != batch size {B}")
 
+        if self.eag_guide is not None:
+            shape = getattr(self.eag_guide, "shape", None)
+            if shape is None:
+                raise ValueError(
+                    f"eag_guide must have .shape attribute "
+                    f"(ndarray or Tensor), got {type(self.eag_guide).__name__}"
+                )
+            if len(shape) not in (2, 3):
+                raise ValueError(
+                    f"eag_guide shape must be 2 (h,D) or 3 (B,h,D), got {tuple(shape)}"
+                )
+            if len(shape) == 3 and shape[0] != B:
+                raise ValueError(f"eag_guide batch dim {shape[0]} != batch size {B}")
+            if shape[-2] < 1:
+                raise ValueError(f"eag_guide must carry at least one action, got {tuple(shape)}")
+
         if self.rtc_prefix_len is not None:
             if not isinstance(self.rtc_prefix_len, int) or self.rtc_prefix_len < 0:
                 raise ValueError(
@@ -141,6 +162,7 @@ _KNOWN_OPTION_KEYS = frozenset(
         "session_ids",
         "action_prefix",
         "rtc_prefix_len",
+        "eag_guide",
     }
 )
 
@@ -190,6 +212,7 @@ def decode_options_to_step_request(
         reset_mask=reset_mask,
         action_prefix=options.get("action_prefix"),
         rtc_prefix_len=options.get("rtc_prefix_len"),
+        eag_guide=options.get("eag_guide"),
         extras=extras,
     )
 

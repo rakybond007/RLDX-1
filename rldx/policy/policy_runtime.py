@@ -17,6 +17,8 @@ PolicyRuntime owns the inference pipeline as a set of named stages:
   _prepare_inputs()     → unbatch + VLA conversion + processor + collate
   _inject_rtc_prefix()  → RTC cache invalidate + prefix build (client or
                           server cache) + inject into collated
+  _inject_eag_guide()   → SAIL EAG guide (physical units, from the client)
+                          normalized + injected as ``eag_guide_actions``
   _run_inference()      → memory scratchpad wrap + autocast + model.get_action
   _decode()             → normalized_action → physical action dict
 
@@ -140,6 +142,7 @@ class PolicyRuntime:
             collated["reset_memory"] = reset_memory
 
         active_sids = self._inject_rtc_prefix(request, collated, B, reset_memory)
+        self._inject_eag_guide(request, collated, B)
 
         model_pred, reset_memory = self._run_inference(
             request,
@@ -269,55 +272,7 @@ class PolicyRuntime:
             # Client sends decoded (physical-unit) actions back as prefix.
             # Normalize them into the model's action space before injection;
             # server-cache path already stores normalized actions.
-            sap = self.processor.state_action_processor
-            tag = (
-                self.embodiment_tag.value
-                if hasattr(self.embodiment_tag, "value")
-                else str(self.embodiment_tag)
-            )
-            modality_keys = sap.modality_configs[tag]["action"].modality_keys
-            joint_dims = []
-            for k in modality_keys:
-                p = sap.norm_params[tag]["action"][k]
-                first = next(arr_k for arr_k in ("min", "mean", "q01") if arr_k in p)
-                joint_dims.append(np.asarray(p[first]).shape[0])
-            real_dim = sum(joint_dims)
-            pf_np = prefix_stack[:, :, :real_dim].cpu().numpy()  # (B, d, real_dim)
-            B_, T_, _ = pf_np.shape
-            normalized = np.zeros_like(pf_np)
-            for b in range(B_):
-                cursor = 0
-                action_dict = {}
-                for k, w in zip(modality_keys, joint_dims):
-                    action_dict[k] = pf_np[b, :, cursor : cursor + w]
-                    cursor += w
-                norm_dict = sap.apply_action(action_dict, embodiment_tag=tag, state=None)
-                cursor = 0
-                for k, w in zip(modality_keys, joint_dims):
-                    normalized[b, :, cursor : cursor + w] = norm_dict[k]
-                    cursor += w
-            pad = prefix_stack.shape[-1] - real_dim
-            if pad > 0:
-                pad_zeros = np.zeros((B_, T_, pad), dtype=normalized.dtype)
-                normalized_full = np.concatenate([normalized, pad_zeros], axis=-1)
-            else:
-                normalized_full = normalized
-            prefix_stack = torch.as_tensor(
-                normalized_full, dtype=prefix_stack.dtype, device=prefix_stack.device
-            )
-
-            # Zero-pad real_dim → model.action_model.action_dim (e.g. ALLEX 48 → 64).
-            expected_dim = self.model.action_model.action_dim
-            actual_dim = prefix_stack.shape[-1]
-            if actual_dim < expected_dim:
-                pad = expected_dim - actual_dim
-                prefix_stack = torch.nn.functional.pad(prefix_stack, (0, pad))
-            elif actual_dim > expected_dim:
-                raise ValueError(
-                    f"client action_prefix dim {actual_dim} exceeds model "
-                    f"max_action_dim {expected_dim} — caller is sending more "
-                    f"channels than the model can consume"
-                )
+            prefix_stack = self._normalize_and_pad(prefix_stack, "action_prefix")
             prefix_source = "client"
         else:
             # Path 2: server cache fallback
@@ -360,6 +315,112 @@ class PolicyRuntime:
             elif self.verbose:
                 print("[SERVER-LOG] RTC postfix Y target: cache miss (cold start ramp)")
         return active_sids
+
+    # ------------------------------------------------------------------
+    # Physical → normalized action conversion (shared by RTC prefix and EAG)
+    # ------------------------------------------------------------------
+
+    def _normalize_and_pad(self, actions: "torch.Tensor", what: str) -> "torch.Tensor":
+        """Normalize physical-unit actions (B, T, D) and zero-pad to action_dim.
+
+        The client speaks physical units — the same units ``_decode`` hands
+        back — so anything it sends into the model's action space (an RTC
+        prefix, a SAIL EAG guide) goes through the processor's own
+        ``apply_action`` first. Padding takes real_dim → the model's
+        ``action_dim`` (e.g. ALLEX 48 → 64), which is the width the action
+        encoders were built for.
+        """
+        sap = self.processor.state_action_processor
+        tag = (
+            self.embodiment_tag.value
+            if hasattr(self.embodiment_tag, "value")
+            else str(self.embodiment_tag)
+        )
+        modality_keys = sap.modality_configs[tag]["action"].modality_keys
+        joint_dims = []
+        for k in modality_keys:
+            p = sap.norm_params[tag]["action"][k]
+            first = next(arr_k for arr_k in ("min", "mean", "q01") if arr_k in p)
+            joint_dims.append(np.asarray(p[first]).shape[0])
+        real_dim = sum(joint_dims)
+        arr_np = actions[:, :, :real_dim].float().cpu().numpy()  # (B, T, real_dim)
+        B_, T_, _ = arr_np.shape
+        normalized = np.zeros_like(arr_np)
+        for b in range(B_):
+            cursor = 0
+            action_dict = {}
+            for k, w in zip(modality_keys, joint_dims):
+                action_dict[k] = arr_np[b, :, cursor : cursor + w]
+                cursor += w
+            norm_dict = sap.apply_action(action_dict, embodiment_tag=tag, state=None)
+            cursor = 0
+            for k, w in zip(modality_keys, joint_dims):
+                normalized[b, :, cursor : cursor + w] = norm_dict[k]
+                cursor += w
+        pad = actions.shape[-1] - real_dim
+        if pad > 0:
+            normalized = np.concatenate(
+                [normalized, np.zeros((B_, T_, pad), dtype=normalized.dtype)], axis=-1
+            )
+        out = torch.as_tensor(normalized, dtype=actions.dtype, device=actions.device)
+
+        expected_dim = self.model.action_model.action_dim
+        actual_dim = out.shape[-1]
+        if actual_dim < expected_dim:
+            out = torch.nn.functional.pad(out, (0, expected_dim - actual_dim))
+        elif actual_dim > expected_dim:
+            raise ValueError(
+                f"client {what} dim {actual_dim} exceeds model "
+                f"max_action_dim {expected_dim} — caller is sending more "
+                f"channels than the model can consume"
+            )
+        return out
+
+    # ------------------------------------------------------------------
+    # Stage 2b: SAIL EAG guide injection
+    # ------------------------------------------------------------------
+
+    def _inject_eag_guide(self, request: StepRequest, collated: dict, B: int) -> None:
+        """Normalize + inject the client's EAG guide as ``eag_guide_actions``.
+
+        SAIL's Error-Adaptive Guidance conditions the chunk on the tail of the
+        previous chunk that has not been executed yet. The client owns that
+        tail (and the tracking-error gate that decides whether to send it at
+        all), so the guide arrives per request in ``options["eag_guide"]``,
+        in physical units, shaped (h, D) or (B, h, D).
+
+        No guide in the request means the unconditional branch alone runs —
+        which is what the model does at episode start, and what a gate that
+        stays closed asks for. A guide on a checkpoint that was not trained
+        with EAG is a caller error, not something to drop silently.
+        """
+        guide = request.eag_guide
+        if guide is None:
+            return
+        if not getattr(self.model.action_model, "use_future_action_condition", False):
+            raise ValueError(
+                "options['eag_guide'] was sent to a checkpoint trained without "
+                "EAG (use_future_action_condition=False)"
+            )
+        if not isinstance(guide, torch.Tensor):
+            guide = torch.as_tensor(np.asarray(guide), dtype=torch.float32)
+        guide = guide.float()
+        if guide.dim() == 2:
+            guide = guide.unsqueeze(0).expand(B, -1, -1)
+        if guide.shape[0] != B:
+            raise ValueError(
+                f"client-supplied eag_guide has batch={guide.shape[0]} but request B={B}"
+            )
+        trained_h = int(self.model.action_model.future_action_condition_horizon)
+        if guide.shape[1] > trained_h:
+            guide = guide[:, :trained_h]
+        guide = self._normalize_and_pad(guide.contiguous(), "eag_guide")
+        collated["eag_guide_actions"] = guide.to(self.model.device, dtype=torch.bfloat16)
+        if self.verbose:
+            print(
+                f"[SERVER-LOG] EAG guide injected: B={B} h={guide.shape[1]} "
+                f"w={self.model.action_model.eag_cfg_weight}"
+            )
 
     # ------------------------------------------------------------------
     # Stage 3: run inference
