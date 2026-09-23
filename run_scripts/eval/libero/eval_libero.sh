@@ -153,6 +153,6 @@ for idx in "${!ALL_TASKS[@]}"; do
     CLEAN="${ALL_TASKS[$idx]#libero_sim/}"
     TIDX="${ALL_TASK_INDICES[$idx]}"
     LOG="$BASE_DIR/output_final/libero/$CKPT_NAME/$SUITE/$CLEAN/eval-local-$TIDX.log"
-    SR=$(grep -oE "success_rate[^0-9]*[0-9.]+" "$LOG" 2>/dev/null | tail -1 || echo "N/A")
+    SR=$(grep -oE "success[ _]rate[^0-9]*[0-9.]+" "$LOG" 2>/dev/null | tail -1 || echo "N/A")
     echo "[i] $SUITE :: $CLEAN -> $SR"
 done

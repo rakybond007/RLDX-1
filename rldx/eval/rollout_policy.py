@@ -25,6 +25,7 @@ from pathlib import Path
 import random
 import re
 import time
+from collections import Counter
 from typing import Any, Dict, List, Tuple
 import uuid
 
@@ -431,6 +432,10 @@ def run_rollout_gymnasium_policy(
     current_lengths = [0] * n_envs
     completed_episodes = 0
     current_successes = [False] * n_envs
+    atq_expert_counts: Counter = Counter()
+    atq_horizon_total = 0
+    atq_conf_sum = 0.0
+    atq_conf_n = 0
     episode_successes = list(existing_successes)
     episode_infos = defaultdict(list)
 
@@ -488,7 +493,19 @@ def run_rollout_gymnasium_policy(
             else:
                 print(f"[CLIENT-LOG] Obs type: {type(observations)}")
 
-        actions, _ = policy.get_action(observations, options=options)
+        actions, step_info = policy.get_action(observations, options=options)
+        # ATQ: the policy reports which expert the router picked and the horizon
+        # it returned. Without this an ungated run -- one whose router never
+        # leaves `main` -- is indistinguishable from the baseline in the log.
+        if isinstance(step_info, dict) and "atq_expert" in step_info:
+            atq_expert_counts[str(step_info["atq_expert"])] += 1
+            atq_horizon_total += int(step_info.get("atq_horizon", 0))
+            if "atq_conf" in step_info:
+                try:
+                    atq_conf_sum += float(np.mean(step_info["atq_conf"]))
+                    atq_conf_n += 1
+                except (TypeError, ValueError):
+                    pass
 
         # Reset the flag after passing it to the policy
         is_first_step = [False] * n_envs
@@ -585,6 +602,12 @@ def run_rollout_gymnasium_policy(
     env.reset()
     env.close()
     print(f"Collecting {n_episodes} episodes took {time.time() - start_time} seconds")
+    if atq_expert_counts:
+        total = sum(atq_expert_counts.values())
+        share = {k: round(v / total, 3) for k, v in sorted(atq_expert_counts.items())}
+        mean_h = atq_horizon_total / total
+        conf = f", mean conf {atq_conf_sum / atq_conf_n:.3f}" if atq_conf_n else ""
+        print(f"atq expert shares: {share} over {total} chunks, mean horizon {mean_h:.2f}{conf}")
 
     if video_dir is not None:
         with open(f"{video_dir}/summary.txt", "w") as f:

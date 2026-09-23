@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 
-SR = re.compile(r"success_rate[^0-9]*([0-9]*\.?[0-9]+)")
+SR = re.compile(r"success[ _]rate[^0-9]*([0-9]*\.?[0-9]+)")
 EXPERT = re.compile(r"atq_expert['\"]?[:=]\s*['\"]?(main|m8|m4|n8)")
 
 
