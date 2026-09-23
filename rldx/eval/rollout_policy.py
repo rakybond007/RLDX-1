@@ -737,13 +737,13 @@ def create_rldx_sim_policy(
     policy_client_host: str = "",
     policy_client_port: int | None = None,
 ) -> BasePolicy:
-    from rldx.policy.rldx_policy import RLDXPolicy, RLDXSimPolicyWrapper
-
     if policy_client_host and policy_client_port:
         from rldx.policy.server_client import PolicyClient
 
         policy = PolicyClient(host=policy_client_host, port=policy_client_port)
     else:
+        from rldx.policy.rldx_policy import RLDXPolicy, RLDXSimPolicyWrapper
+
         policy = RLDXSimPolicyWrapper(
             RLDXPolicy(
                 embodiment_tag=embodiment_tag,

@@ -141,6 +141,7 @@ cython_debug/
 # Virtual environments
 .venv/
 .venv-libero-eval/
+.venv-robocasa-eval/
 .venv/*
 env/
 venv/
