@@ -20,6 +20,49 @@ HORIZONS = {'libero_spatial': 220, 'libero_object': 280, 'libero_goal': 300, 'li
 ACTION_KEYS = ('x', 'y', 'z', 'roll', 'pitch', 'yaw', 'gripper')
 
 
+def disable_arm_action_clip():
+    """Keep the OSC affine action scale while removing its input saturation."""
+    from robosuite.controllers.osc import OperationalSpaceController
+
+    def scale_action(self, action):
+        if self.action_scale is None:
+            self.action_scale = abs(self.output_max - self.output_min) / abs(self.input_max - self.input_min)
+            self.action_output_transform = (self.output_max + self.output_min) / 2.0
+            self.action_input_transform = (self.input_max + self.input_min) / 2.0
+        return (np.asarray(action, dtype=np.float64) - self.action_input_transform) * self.action_scale + self.action_output_transform
+
+    OperationalSpaceController.scale_action = scale_action
+
+
+def configure_controller(env, no_action_clip, gripper_gain_scale):
+    """Check the live OSC and scale gripper actuator kp after every reset."""
+    base = env._env
+    for _ in range(10):
+        if hasattr(base, 'robots'):
+            break
+        base = getattr(base, 'env', base)
+    robots = getattr(base, 'robots', [])
+    if not robots:
+        raise RuntimeError('LIBERO robot not found after reset')
+    controller = robots[0].controller
+    if no_action_clip:
+        command = np.zeros_like(np.asarray(controller.input_max, dtype=float))
+        command[0] = 40.7
+        scaled = np.asarray(controller.scale_action(command), dtype=float)
+        rail = float(np.asarray(controller.output_max, dtype=float).reshape(-1)[0])
+        if not np.isfinite(scaled).all() or abs(scaled.reshape(-1)[0]) <= 1.5 * abs(rail):
+            raise RuntimeError(f'OSC action clip still active: probe={scaled.reshape(-1)[0]}, rail={rail}')
+    if gripper_gain_scale != 1.0:
+        indexes = list(getattr(robots[0], '_ref_joint_gripper_actuator_indexes', None) or [])
+        if not indexes:
+            raise RuntimeError('LIBERO gripper actuator indexes not found')
+        model = base.sim.model
+        for index in indexes:
+            model.actuator_gainprm[index, 0] *= gripper_gain_scale
+            model.actuator_biasprm[index, 1] *= gripper_gain_scale
+        print(f'GRIPPER_GAIN {model.actuator_gainprm[indexes[0], 0]:.1f} ({len(indexes)} actuators)', flush=True)
+
+
 def pack_observation(obs):
     return {k: ([v] if k.startswith('annotation.') else np.asarray(v)[None, None])
             for k, v in obs.items()}
@@ -34,9 +77,14 @@ def main():
     p.add_argument('--replan-steps', type=int, default=5)
     p.add_argument('--seed', type=int, default=7)
     p.add_argument('--task-index', type=int, default=-1)
+    p.add_argument('--no-action-clip', action='store_true')
+    p.add_argument('--gripper-gain-scale', type=float, default=1.0)
     a = p.parse_args()
     assert a.replan_steps == 5, 'This baseline uses replan_steps=5'
     assert 1 <= a.episodes <= 50
+    assert a.gripper_gain_scale > 0
+    if a.no_action_clip:
+        disable_arm_action_clip()
     random.seed(a.seed)
     np.random.seed(a.seed)
     a.output.mkdir(parents=True, exist_ok=True)
@@ -65,6 +113,7 @@ def main():
         try:
             for episode in range(a.episodes):
                 env.reset()
+                configure_controller(env, a.no_action_clip, a.gripper_gain_scale)
                 raw = env._env.set_init_state(initial_states[episode])
                 for _ in range(10):
                     raw, _, _, _ = env._env.step([0.0] * 6 + [-1.0])
@@ -92,7 +141,8 @@ def main():
                         break
                 result = dict(suite=a.suite, task_id=task_id, task=task.name, episode=episode,
                               initial_state_id=episode, success=success, steps=step + 1,
-                              policy_calls=calls, replan_steps=a.replan_steps, seed=a.seed)
+                              policy_calls=calls, replan_steps=a.replan_steps, seed=a.seed,
+                              no_action_clip=a.no_action_clip, gripper_gain_scale=a.gripper_gain_scale)
                 results.append(result)
                 with (a.output / 'episodes.jsonl').open('a') as f:
                     f.write(json.dumps(result) + '\n')
@@ -103,7 +153,8 @@ def main():
             env.close()
     summary = dict(suite=a.suite, episodes=len(results), successes=sum(r['success'] for r in results),
                    success_rate=sum(r['success'] for r in results) / len(results), replan_steps=a.replan_steps,
-                   seed=a.seed, max_episode_steps=HORIZONS[a.suite], settling_steps=10)
+                   seed=a.seed, max_episode_steps=HORIZONS[a.suite], settling_steps=10,
+                   no_action_clip=a.no_action_clip, gripper_gain_scale=a.gripper_gain_scale)
     (a.output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     print('EVAL_SUMMARY ' + json.dumps(summary), flush=True)
 
