@@ -1,4 +1,4 @@
-"""Sharded LIBERO loader for explicit DemoSpeedup targets and validity masks."""
+"""Sharded loader for explicit DemoSpeedup targets and validity masks."""
 
 import json
 
@@ -43,7 +43,11 @@ class DemoSpeedupShardedSingleStepDataset(ShardedSingleStepDataset):
     def get_datapoint(self, episode_data, step_index: int) -> dict:
         assert self.processor is not None, "Processor must be set before getting datapoints"
         row = episode_data.iloc[step_index]
-        targets = np.asarray(row["speedup.actions"], dtype=np.float32).reshape(8, 7)
+        action_width = sum(
+            group["end"] - group["start"]
+            for group in self.episode_loader.modality_meta["action"].values()
+        )
+        targets = np.asarray(row["speedup.actions"], dtype=np.float32).reshape(8, action_width)
         valid = np.asarray(row["speedup.valid"], dtype=bool)
         if valid.shape != (8,) or not valid.any() or not np.all(valid == (np.arange(8) < valid.sum())):
             raise ValueError(f"Invalid DemoSpeedup target mask at frame {step_index}")
