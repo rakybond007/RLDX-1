@@ -26,7 +26,7 @@ if [[ -z "${BASE_MODEL_PATH:-}" ]]; then
         BASE_MODEL_PATH="RLWRLD/RLDX-1-PT-IMG"
     fi
 fi
-NUM_GPUS=2
+NUM_GPUS="${NUM_GPUS:-2}"
 GLOBAL_BATCH_SIZE=64
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 if [[ "$GRAD_ACCUM" != 1 ]]; then
@@ -38,8 +38,9 @@ RUN_NAME="${RUN_NAME:-rldx1_img_robocasa_demospeedup_slow2_fast4_gb64_60k}"
 OUTPUT_DIR="${OUTPUT_DIR:-${MODEL_OUTPUT_DIR:-$BASE_DIR/outputs}}"
 [[ -f "$DATA_DIR/meta/modality.json" ]] || { echo "Missing dataset: $DATA_DIR" >&2; exit 1; }
 [[ -f "$DATA_DIR/meta/speedup_action_stats.json" ]] || { echo "Missing DemoSpeedup action stats: $DATA_DIR" >&2; exit 1; }
+[[ "$NUM_GPUS" =~ ^[1-9][0-9]*$ ]] || { echo 'NUM_GPUS must be positive.' >&2; exit 1; }
 [[ "$GRAD_ACCUM" =~ ^[1-9][0-9]*$ ]] && (( GLOBAL_BATCH_SIZE % (NUM_GPUS * GRAD_ACCUM) == 0 )) || {
-    echo 'GRAD_ACCUM must be a positive divisor of 32.' >&2; exit 1;
+    echo 'GLOBAL_BATCH_SIZE=64 must be divisible by NUM_GPUS * GRAD_ACCUM.' >&2; exit 1;
 }
 export NO_ALBUMENTATIONS_UPDATE=1
 export TOKENIZERS_PARALLELISM=false
