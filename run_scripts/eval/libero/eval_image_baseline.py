@@ -77,6 +77,7 @@ def main():
     p.add_argument('--replan-steps', type=int, default=5)
     p.add_argument('--seed', type=int, default=7)
     p.add_argument('--task-index', type=int, default=-1)
+    p.add_argument('--resume', action='store_true')
     p.add_argument('--no-action-clip', action='store_true')
     p.add_argument('--gripper-gain-scale', type=float, default=1.0)
     a = p.parse_args()
@@ -88,6 +89,10 @@ def main():
     random.seed(a.seed)
     np.random.seed(a.seed)
     a.output.mkdir(parents=True, exist_ok=True)
+    ledger = a.output / 'episodes.jsonl'
+    previous = [json.loads(line) for line in ledger.read_text().splitlines()] if a.resume and ledger.exists() else []
+    seen = {(row['task_id'], row['episode']) for row in previous}
+    assert len(seen) == len(previous), 'Duplicate episodes in evaluation ledger'
     client = PolicyClient(host='127.0.0.1', port=a.port, timeout_ms=2000, strict=False)
     deadline = time.monotonic() + 1200
     while not client.ping():
@@ -112,6 +117,8 @@ def main():
         env._env.seed(a.seed)
         try:
             for episode in range(a.episodes):
+                if (task_id, episode) in seen:
+                    continue
                 env.reset()
                 configure_controller(env, a.no_action_clip, a.gripper_gain_scale)
                 raw = env._env.set_init_state(initial_states[episode])
@@ -144,15 +151,16 @@ def main():
                               policy_calls=calls, replan_steps=a.replan_steps, seed=a.seed,
                               no_action_clip=a.no_action_clip, gripper_gain_scale=a.gripper_gain_scale)
                 results.append(result)
-                with (a.output / 'episodes.jsonl').open('a') as f:
+                with ledger.open('a') as f:
                     f.write(json.dumps(result) + '\n')
                 print('EVAL_EPISODE ' + json.dumps(result), flush=True)
                 if frames:
                     imageio.mimsave(a.output / f'{task_id:02d}_episode0_{success}.mp4', frames, fps=20)
         finally:
             env.close()
-    summary = dict(suite=a.suite, episodes=len(results), successes=sum(r['success'] for r in results),
-                   success_rate=sum(r['success'] for r in results) / len(results), replan_steps=a.replan_steps,
+    all_results = previous + results
+    summary = dict(suite=a.suite, episodes=len(all_results), successes=sum(r['success'] for r in all_results),
+                   success_rate=sum(r['success'] for r in all_results) / len(all_results), replan_steps=a.replan_steps,
                    seed=a.seed, max_episode_steps=HORIZONS[a.suite], settling_steps=10,
                    no_action_clip=a.no_action_clip, gripper_gain_scale=a.gripper_gain_scale)
     (a.output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
