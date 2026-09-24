@@ -99,6 +99,65 @@ class WrapperConfigs:
     multistep: MultiStepConfig = field(default_factory=MultiStepConfig)
 
 
+# Per-task OSC position gain for RoboCasa-Kitchen (Table 9). Applies to the
+# arm ("right" body part) of the HYBRID_MOBILE_BASE composite controller; the
+# torso and base gains are left alone. RoboCasa's own default is 150.
+# Opt-in: set ROBOCASA_OSC_KP=table9 to apply these. It has to be opt-in because
+# eval_robocasa.sh launches one rollout_policy process per task, so a default-on
+# switch would change the gains of an already-running default-gain eval midway.
+ROBOCASA_OSC_KP = {
+    "CloseDoubleDoor": 150,
+    "CloseDrawer": 300,
+    "CloseSingleDoor": 300,
+    "CoffeePressButton": 150,
+    "CoffeeServeMug": 150,
+    "CoffeeSetupMug": 150,
+    "OpenDoubleDoor": 150,
+    "OpenDrawer": 150,
+    "OpenSingleDoor": 150,
+    "PnPCabToCounter": 300,
+    "PnPCounterToCab": 150,
+    "PnPCounterToMicrowave": 150,
+    "PnPCounterToSink": 300,
+    "PnPCounterToStove": 300,
+    "PnPMicrowaveToCounter": 300,
+    "PnPSinkToCounter": 300,
+    "PnPStoveToCounter": 300,
+    "TurnOffMicrowave": 300,
+    "TurnOffSinkFaucet": 150,
+    "TurnOffStove": 150,
+    "TurnOnMicrowave": 150,
+    "TurnOnSinkFaucet": 150,
+    "TurnOnStove": 150,
+    "TurnSinkSpout": 600,
+}
+
+
+def _robocasa_osc_kp(env_name: str):
+    """Table 9 gain for ``robocasa_panda_omron/<TASK>_PandaOmron_Env``."""
+    if os.environ.get("ROBOCASA_OSC_KP", "default") != "table9":
+        return None
+    if not env_name.startswith("robocasa_panda_omron/"):
+        return None
+    task = env_name.split("/", 1)[1].removesuffix("_PandaOmron_Env")
+    return ROBOCASA_OSC_KP.get(task)
+
+
+def _apply_robocasa_osc_kp(env, kp: int) -> None:
+    """Write the arm gain where a reset rebuilds the controller from, then
+    rebuild the live one so the pre-reset episode uses it too."""
+    sim = env.unwrapped.env
+    for cfg in sim.robot_configs:
+        parts = cfg.get("composite_controller_config", {}).get("body_parts", {})
+        if "right" in parts:
+            parts["right"]["kp"] = kp
+    for robot in sim.robots:
+        robot.composite_controller_config["body_parts"]["right"]["kp"] = kp
+        if "right" in getattr(robot, "part_controller_config", {}):
+            robot.part_controller_config["right"]["kp"] = kp
+        robot._load_controller()
+
+
 def get_robocasa_env_fn(
     env_name: str,
     seed: int = 0,
@@ -145,7 +204,11 @@ def get_robocasa_env_fn(
             if embodiment_tag == EmbodimentTag.ROBOCASA_PANDA_OMRON:
                 env = RoboCasa365ObsKeyRemapWrapper(env)
             return env
-        return gym.make(env_name, enable_render=True, seed=seed)
+        env = gym.make(env_name, enable_render=True, seed=seed)
+        kp = _robocasa_osc_kp(env_name)
+        if kp is not None:
+            _apply_robocasa_osc_kp(env, kp)
+        return env
 
     return env_fn
 

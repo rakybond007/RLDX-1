@@ -98,15 +98,87 @@ def invert_gripper_action(action):
     return action
 
 
+# Per-task OSC position gain (Table 8). Keyed by task name, not index: the
+# installed LIBERO build is LIBERO-plus, whose suites hold ~2500 augmented
+# variants each, so a positional index would address the wrong task entirely.
+# The 40 names below are the original LIBERO tasks the eval runner iterates.
+# LIBERO's own default is 150 everywhere; robosuite applies kp unclamped in the
+# "fixed" impedance mode, so the 600 entry survives kp_limits of [0, 300].
+# Opt-in: set LIBERO_OSC_KP=table8 to apply these (one process per task, so a
+# default-on switch would change an already-running eval midway).
+OSC_KP = {
+    # libero_spatial
+    "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate": 150,
+    "pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate": 150,
+    "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate": 300,
+    "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate": 300,
+    "pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate": 150,
+    "pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate": 150,
+    "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate": 300,
+    "pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate": 150,
+    "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate": 150,
+    "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate": 150,
+    # libero_object
+    "pick_up_the_alphabet_soup_and_place_it_in_the_basket": 300,
+    "pick_up_the_cream_cheese_and_place_it_in_the_basket": 150,
+    "pick_up_the_salad_dressing_and_place_it_in_the_basket": 300,
+    "pick_up_the_bbq_sauce_and_place_it_in_the_basket": 150,
+    "pick_up_the_ketchup_and_place_it_in_the_basket": 300,
+    "pick_up_the_tomato_sauce_and_place_it_in_the_basket": 300,
+    "pick_up_the_butter_and_place_it_in_the_basket": 300,
+    "pick_up_the_milk_and_place_it_in_the_basket": 300,
+    "pick_up_the_chocolate_pudding_and_place_it_in_the_basket": 600,
+    "pick_up_the_orange_juice_and_place_it_in_the_basket": 300,
+    # libero_goal
+    "open_the_middle_drawer_of_the_cabinet": 300,
+    "put_the_bowl_on_the_stove": 150,
+    "put_the_wine_bottle_on_top_of_the_cabinet": 150,
+    "open_the_top_drawer_and_put_the_bowl_inside": 150,
+    "put_the_bowl_on_top_of_the_cabinet": 150,
+    "push_the_plate_to_the_front_of_the_stove": 150,
+    "put_the_cream_cheese_in_the_bowl": 150,
+    "turn_on_the_stove": 150,
+    "put_the_bowl_on_the_plate": 150,
+    "put_the_wine_bottle_on_the_rack": 300,
+    # libero_10
+    "LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket": 300,
+    "LIVING_ROOM_SCENE2_put_both_the_cream_cheese_box_and_the_butter_in_the_basket": 150,
+    "KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it": 150,
+    "KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it": 300,
+    "LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_and_put_the_yellow_and_white_mug_on_the_right_plate": 150,
+    "STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy": 300,
+    "LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_and_put_the_chocolate_pudding_to_the_right_of_the_plate": 150,
+    "LIVING_ROOM_SCENE1_put_both_the_alphabet_soup_and_the_cream_cheese_box_in_the_basket": 300,
+    "KITCHEN_SCENE8_put_both_moka_pots_on_the_stove": 150,
+    "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it": 150,
+}
+
+
 class LiberoEnv(gym.Env):
     """LanguageTable env."""
 
-    def __init__(self, task_bddl_file: str, task_description: str):
+    def __init__(self, task_bddl_file: str, task_description: str, osc_kp: int | None = None):
         self._env = OffScreenRenderEnv(
             bddl_file_name=task_bddl_file,
             camera_heights=256,
             camera_widths=256,
         )
+        if osc_kp is not None:
+            # This LIBERO build takes a controller *name* and loads the config
+            # itself, so there is no controller_configs argument to override.
+            # The gain has to go into ``robot_configs``: LIBERO runs with
+            # hard_reset, and ``_load_robots`` rebuilds every Robot from that
+            # dict on each reset, discarding anything set on the robot or the
+            # controller. The live controller is patched too, for the episode
+            # that runs before the first reset.
+            sim_env = self._env.env
+            for cfg in sim_env.robot_configs:
+                cfg["controller_config"]["kp"] = osc_kp
+            for robot in sim_env.robots:
+                robot.controller_config["kp"] = osc_kp
+                ctrl = robot.controller
+                ctrl.kp = ctrl.nums2array(osc_kp, 6)
+                ctrl.kd = 2 * np.sqrt(ctrl.kp)  # damping_ratio is 1 in the stock config
         self._task_description = task_description
         # Convert Gym action space to Gymnasium.
         self.observation_space = gym.spaces.Dict(
@@ -208,13 +280,17 @@ def register_libero_envs():
             task_bddl_file = os.path.join(
                 get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
             )
+            kwargs = {
+                "task_bddl_file": task_bddl_file,
+                "task_description": task_description,
+            }
+            if os.environ.get("LIBERO_OSC_KP", "default") == "table8":
+                if task_name in OSC_KP:
+                    kwargs["osc_kp"] = OSC_KP[task_name]
             register(
                 id=f"libero_sim/{task_name}",
                 entry_point="rldx.eval.sim.LIBERO.libero_env:LiberoEnv",
-                kwargs={
-                    "task_bddl_file": task_bddl_file,
-                    "task_description": task_description,
-                },
+                kwargs=kwargs,
             )
 
 
