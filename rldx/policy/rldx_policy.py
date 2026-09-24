@@ -568,8 +568,14 @@ class RLDXSimPolicyWrapper(PolicyWrapper):
         """
         modality_configs = self.get_modality_config()
 
-        # Validate each action key defined in the modality config
-        for action_key in modality_configs["action"].modality_keys:
+        # Validate each action key the policy actually emits. Under ATQ the conf
+        # label carrier (e.g. ``ratio_label``) sits in the action modality keys
+        # but is never returned, so fall back to the validator's resolved key
+        # list the same way RLDXPolicy does.
+        action_keys = getattr(getattr(self.policy, "validator", None), "action_keys", None)
+        if action_keys is None:
+            action_keys = modality_configs["action"].modality_keys
+        for action_key in action_keys:
             # Construct flat key expected in RLDX sim environment (e.g., 'action.joints')
             parsed_key = f"action.{action_key}"
             assert parsed_key in action, f"Action key '{parsed_key}' must be in action"
@@ -591,10 +597,18 @@ class RLDXSimPolicyWrapper(PolicyWrapper):
                 f"Action key '{action_key}' must be a numpy array of shape (B, T, D), got {action_arr.shape}"
             )
 
-            # Verify action horizon matches the expected temporal dimension from config
-            assert action_arr.shape[1] == len(modality_configs["action"].delta_indices), (
-                f"Action key '{action_key}'s horizon must be {len(modality_configs['action'].delta_indices)}. Got {action_arr.shape[1]}"
-            )
+            # Verify action horizon matches the expected temporal dimension from config.
+            # ATQ experts return variable-length chunks, so only a lower bound holds
+            # there — same carve-out ObservationValidator makes via
+            # ``variable_action_horizon``.
+            if getattr(self.policy, "use_atq_moe", False):
+                assert action_arr.shape[1] >= 1, (
+                    f"Action key '{action_key}' must have at least one row, got {action_arr.shape}"
+                )
+            else:
+                assert action_arr.shape[1] == len(modality_configs["action"].delta_indices), (
+                    f"Action key '{action_key}'s horizon must be {len(modality_configs['action'].delta_indices)}. Got {action_arr.shape[1]}"
+                )
 
     def get_modality_config(self) -> dict[str, ModalityConfig]:
         """Get the modality configuration from the underlying policy.

@@ -182,7 +182,12 @@ class LiberoEnv(gym.Env):
         observation, reward, done, info = self._env.step(action_vector)
         observation = self._process_observation(observation)
         info["success"] = self._env.check_success()
-        truncated = False
+        # LIBERO's bddl_base_domain.step replaces robosuite's ``done`` with
+        # ``_check_success()``, so a horizon-terminated episode looks unfinished
+        # from here while robosuite refuses any further step. Surface that as
+        # truncation, otherwise the caller keeps stepping and robosuite raises
+        # "executing action in terminated episode".
+        truncated = bool(getattr(self._env.env, "done", False))
         return observation, reward, done, truncated, info
 
 

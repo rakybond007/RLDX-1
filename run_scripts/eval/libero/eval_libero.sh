@@ -131,7 +131,7 @@ for idx in "${!ALL_TASKS[@]}"; do
         --n_episodes $N_EP \
         --policy_client_host 127.0.0.1 \
         --policy_client_port "$PORT" \
-        --max_episode_steps ${MAX_EPISODE_STEPS:-1500} \
+        --max_episode_steps ${MAX_EPISODE_STEPS:-720} \
         --env_name "$TASK" \
         --n_action_steps ${N_ACTION_STEPS:-8} \
         --n_envs ${N_ENVS:-5} \

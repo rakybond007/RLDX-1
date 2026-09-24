@@ -299,7 +299,10 @@ class MultiStepWrapper(gym.Wrapper):
             ):
                 # truncation
                 done = True
-            self.done.append(done)
+            # A truncated episode has to stop the chunk as well: the env refuses
+            # any further step, and with a variable-length ATQ chunk there are
+            # usually rows left to execute when that happens.
+            self.done.append(done or truncated)
             self._add_info(info)
 
         observation = self._get_obs(self.video_delta_indices, self.state_delta_indices)

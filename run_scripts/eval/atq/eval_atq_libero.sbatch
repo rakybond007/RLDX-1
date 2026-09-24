@@ -18,9 +18,18 @@ RUN_LABEL="${RUN_LABEL:?set RUN_LABEL}"
 MODEL_PATH="${MODEL_PATH:?set MODEL_PATH}"
 [[ -d "$MODEL_PATH" ]] || { echo "[ERR] missing checkpoint: $MODEL_PATH" >&2; exit 1; }
 export N_ENVS="${N_ENVS:-1}" N_ACTION_STEPS="${N_ACTION_STEPS:-8}"
-export MAX_EPISODE_STEPS="${MAX_EPISODE_STEPS:-1500}"
+# LIBERO's robosuite horizon is 1000 and bddl_base_domain.step hides it by
+# overwriting done with _check_success(), so anything above that horizon lets
+# the rollout step a terminated env. 720 is the value this benchmark was run
+# with before the ATQ change raised it.
+export MAX_EPISODE_STEPS="${MAX_EPISODE_STEPS:-720}"
 echo "=== ATQ LIBERO eval | label=$RUN_LABEL | ckpt=$MODEL_PATH"
 echo "=== n_envs=$N_ENVS n_action_steps=$N_ACTION_STEPS max_episode_steps=$MAX_EPISODE_STEPS"
+# The EGL_NOT_INITIALIZED tracebacks these runs print are interpreter-shutdown
+# noise from __del__, not the failure: tasks died on MAX_EPISODE_STEPS exceeding
+# robosuite's horizon (see above). Re-running is cheap: the rollout resumes from
+# the episodes already on disk and short-circuits tasks that already hit the
+# target.
 bash run_scripts/eval/libero/eval_libero.sh "$RUN_LABEL" "$MODEL_PATH" 0 "${MAX_PARALLEL:-4}"
 RC=$?
 echo "=== eval rc=$RC $(date '+%F %T')"
