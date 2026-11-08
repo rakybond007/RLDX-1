@@ -45,7 +45,7 @@ ARM_W=("0.0" "-1.0")
 ARM_NAME=("paperw1" "paperw0")
 
 CKPT=${CKPT:-/sjw_alinlab2/home/taekwan/ckpt/rldx_img_sail/robocasa/step60000}
-RLDX_ROOT=/sjw_alinlab2/home/taekwan/RLDX-1                             # tk branch: EAG server + this client
+RLDX_ROOT=/sjw_alinlab2/home/taekwan/reproducing/RLDX-1                             # tk branch: EAG server + this client
 SERVER_PY=$RLDX_ROOT/.venv/bin/python
 SERVER_HF_HOME=$RLDX_ROOT/.cache/huggingface
 CLIENT_PY=/sjw_alinlab2/home/jimin/workspace/FasterVLA/RLDX-1-ATQ/rldx/eval/sim/robocasa/robocasa_uv/.venv/bin/python
@@ -62,7 +62,7 @@ TASKCFG=(
 )
 CHUNKS=("0 1 2" "3 4 5" "6 7 8" "9 10 11" "12 13 14" "15 16 17" "18 19 20" "21 22 23")
 
-BASE_DIR=/sjw_alinlab2/home/taekwan/Isaac-GR00T
+BASE_DIR=/sjw_alinlab2/home/taekwan/reproducing
 source "$BASE_DIR/run_scripts/eval/_model_output_dir.sh" || exit 1
 source "$BASE_DIR/run_scripts/eval/_wait_server.sh" || exit 1
 eqs_require_model_output_dir
